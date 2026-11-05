@@ -1093,6 +1093,7 @@ enum class ReliableKind : uint8_t {
     AtvAnswer = 251,
     AtvSetComplete = 252,
     LlamaState = 253, // host llama light/state + expiring sound edge; no client physics/AI replay
+    MannequinSight = 254, // negotiated per-viewer gaze and host stand; point-to-point, never relayed
 };
 
 #pragma pack(push, 1)
@@ -3451,6 +3452,7 @@ inline constexpr uint8_t kItemActivateFlag_HasActorKey = 0x01;
 // the receiver checks the format only: a zero-damage knock-down and a lethal 1E+27 are both real.
 inline constexpr uint8_t kPlayerHitVerbAddDamage = 0;  // v0 = impact
 inline constexpr uint8_t kPlayerHitVerbPunch     = 1;  // v0 = fullBody, v1 = boneImp, v2 = damageLocation
+inline constexpr uint8_t kPlayerHitVerbIgnite    = 2;  // damage = native fuel; sourceEid = 0
 inline constexpr uint8_t kPlayerHitBoneCount     = 6;  // bone: None, chest, head, pelvis, torso, lowlegs
 
 struct PlayerHitPayload {
@@ -3499,6 +3501,18 @@ struct PyramidGatherPayload {
     uint32_t wispEid;     // host-range Npc element id of the gathered killerwisp_C
 };
 static_assert(sizeof(PyramidGatherPayload) == 8, "PyramidGatherPayload must be exactly 8 bytes");
+// Optional join snapshot. Keep the original IDs intact: legacy receivers read
+// the first 8 bytes, while updated receivers restore the native playback phase.
+struct PyramidGatherStatePayload {
+    PyramidGatherPayload gather;
+    float montagePosition;
+    float playRate;
+    float timelinePosition[3];
+    uint8_t timelineFlags; // bits 0..2 playing, 3..5 reversing
+    uint8_t consumed;      // wisp already retired; only the pyramid tail remains
+    uint16_t reserved;
+};
+static_assert(sizeof(PyramidGatherStatePayload) == 32, "Pyramid join state layout");
 static_assert(sizeof(PyramidGatherPayload) <= 256 - 20 - 8,
               "PyramidGatherPayload must fit in one reliable datagram");
 
@@ -4500,5 +4514,16 @@ inline bool ValidateClock(const TimeSyncPayload& c) {
     return std::isfinite(c.totalTime) && std::isfinite(c.day) && std::fabs(c.totalTime) <= 1.0e7f &&
            std::fabs(c.day) <= 1.0e7f && c.dayZ >= 0 && c.dayZ <= 1000000;
 }
+
+#pragma pack(push, 1)
+// Feature-local version1; Hello/Ack zero key/eid/token/value. Data names a host incarnation.
+struct MannequinSightPayload {
+    uint8_t version, op, value, reserved;
+    uint64_t world, challenge, token;
+    uint32_t eid;
+    WireKey key;
+};
+#pragma pack(pop)
+static_assert(sizeof(MannequinSightPayload)==64, "mannequin sight payload");
 
 }  // namespace coop::net

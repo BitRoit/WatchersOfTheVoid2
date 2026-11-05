@@ -66,6 +66,14 @@ struct Row {
     const char* tag;
 };
 constexpr Row kRows[] = {
+    // White lightning orb: the host selects targets and beams. Construction and
+    // BeginPlay keep cosmetic components/timers; these entries stop attack RNG.
+    {nullptr, L"HoelUfo_C", L"attack", "HoelUfo.attack"},
+    {nullptr, L"HoelUfo_C", L"attackBeam", "HoelUfo.attackBeam"},
+    {nullptr, L"superFog_C", L"spawnUfo", "superFog.spawnUfo"},
+    // Native BeginPlay applies ignition, damage and radial impulse. Wire mirrors
+    // paint only the host endpoint and keep their auto-activated native audio.
+    {nullptr, L"hoelUfoAttack_C", L"ReceiveBeginPlay", "hoelUfoAttack.ReceiveBeginPlay"},
     {&kRowSpawnMushroomMaster, nullptr, nullptr, "mushroomMaster.Spawn"},
     {&kRowSpawnMushroomSpawner, nullptr, nullptr, "mushroomSpawner.Spawn"},
     // A late-game class: keyed by name, the watch holds from the class's first body, whenever it loads.
@@ -117,6 +125,10 @@ constexpr Row kRows[] = {
     // Mimics are prop_impostor, with a props-table disguise chosen BEFORE finish.
     // The ordinary keyed prop lane preserves both the real class and that row.
     {nullptr, L"impostorPropsMaster_C", L"gen", "impostorPropsMaster.gen"},
+    // Walking Mannequin: host authoritatively manages spawn points and rolls; clients must not
+    // spawn independent local walkers.
+    {nullptr, L"wMannequinSpawn_C", L"spawn", "wMannequinSpawn.spawn"},
+    {nullptr, L"wMannequinSpawn_C", L"prepareSpawn", "wMannequinSpawn.prepareSpawn"},
     // Its tick only culls the actor when unseen and far from the LOCAL camera.
     // A mirror must survive the client's view; host PropDestroy ends its lifetime.
     // Keep BeginPlay/init intact: they install the disguise and flesh material.
@@ -148,6 +160,29 @@ SG::Verdict OnRowPre(const SG::Call& call) {
 std::atomic<bool> g_watched{false};
 
 }  // namespace
+
+bool HoelMirrorGatesReady(bool beam) {
+    if(!IsActiveClientSession())return false;
+    const auto ready=[beam]{
+        // Resolve tags from the same table that registered them.
+        int found=0;
+        for(int i=0;i<kRowCount;++i) {
+            if(!kRows[i].className)continue;
+            const bool match=beam ? std::wstring(kRows[i].className)==L"hoelUfoAttack_C" :
+                std::wstring(kRows[i].className)==L"HoelUfo_C";
+            if(!match)continue;
+            ++found;
+            if(!SG::ClassNameWatchLive(kRows[i].className,kRows[i].functionName,kTagBase+i))return false;
+        }
+        return found==(beam?1:2);
+    };
+    if(ready())return true;
+    // Called on the game thread before mirror birth. Classes are hard imports
+    // of the loaded day/night cycle; close a first-frame watch-resolution gap,
+    // without repeating the global resolver on ordinary already-ready beams.
+    SG::ResolvePendingNames();
+    return ready();
+}
 
 // Refuse only while an active client session exists: the running flag flips true in the session
 // start and false in the stop, which every disconnect path reaches; a bare role gate would bleed the

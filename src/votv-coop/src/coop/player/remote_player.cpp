@@ -628,18 +628,52 @@ void RemotePlayer::RefreshView() {
         R::ClassOf(actor)==cls.Get();};
     const auto aim=GetSyncedAimRotation();
     if(!current()||!std::isfinite(aim.Pitch)||!std::isfinite(aim.Yaw))return;
-    const int32_t offset=R::FindPropertyOffset(cls.Get(),L"lag_fl");
-    if(!current())return;
+    void* const viewClass=cls.Get();
+    if(!viewLayoutClass_.Is(viewClass)){
+        viewLayoutClass_.Reset();
+        lagFlOffset_=lightROffset_=kViewOffsetUnresolved;
+        viewLayoutClass_.Set(viewClass);
+    }
+    if(!current()||!viewLayoutClass_.Is(viewClass))return;
+    if(lagFlOffset_==kViewOffsetUnresolved){
+        const int32_t resolved=R::FindPropertyOffset(viewClass,L"lag_fl");
+        if(!current()||!viewLayoutClass_.Is(viewClass))return;
+        if(resolved>=0)lagFlOffset_=resolved;
+    }
+    const int32_t offset=lagFlOffset_==kViewOffsetUnresolved?-1:lagFlOffset_;
     if(offset>=0){
         void* component=*reinterpret_cast<void**>(static_cast<uint8_t*>(actor)+offset);
         if(component&&R::IsLive(component)){
             ue_wrap::CachedObjRef arm,armClass;arm.Set(component);armClass.Set(R::ClassOf(component));
             const auto attached=[&]{return current()&&arm.Get()&&armClass.Get()&&R::ClassOf(component)==armClass.Get()&&
-                R::FindPropertyOffset(cls.Get(),L"lag_fl")==offset&&
+                viewLayoutClass_.Is(viewClass)&&lagFlOffset_==offset&&
                 *reinterpret_cast<void**>(static_cast<uint8_t*>(actor)+offset)==component;};
             // World rotation remains correct after a tilted seat changes the actor root.
             if(attached())E::SetComponentWorldRotation(component,aim);
             if(!attached())return;
+        }
+    }
+    if(lightROffset_==kViewOffsetUnresolved){
+        const int32_t resolved=R::FindPropertyOffset(viewClass,L"light_R");
+        if(!current()||!viewLayoutClass_.Is(viewClass))return;
+        if(resolved>=0)lightROffset_=resolved;
+    }
+    const int32_t lightOffset=lightROffset_==kViewOffsetUnresolved?-1:lightROffset_;
+    if(lightOffset>=0&&current()){
+        ue_wrap::FVector actorLoc{};
+        if(E::TryGetActorLocation(actor,actorLoc)&&current()&&viewLayoutClass_.Is(viewClass)){
+            void* lightComp=*reinterpret_cast<void**>(static_cast<uint8_t*>(actor)+lightOffset);
+            if(lightComp&&R::IsLive(lightComp)){
+                constexpr float rad=.01745329252f;
+                const float yRad=aim.Yaw*rad,pRad=aim.Pitch*rad,cp=std::cos(pRad);
+                const ue_wrap::FVector fwd{cp*std::cos(yRad),cp*std::sin(yRad),std::sin(pRad)};
+                const ue_wrap::FVector lightPos{
+                    actorLoc.X+fwd.X*30.f,
+                    actorLoc.Y+fwd.Y*30.f,
+                    actorLoc.Z+70.f+fwd.Z*30.f
+                };
+                E::SetComponentWorldLocationAndRotation(lightComp,lightPos,aim);
+            }
         }
     }
     ue_wrap::FVector head{};

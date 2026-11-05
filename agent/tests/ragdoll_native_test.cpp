@@ -11,7 +11,7 @@ namespace test {
 enum Id{Player,Body,Mesh,Source,Asset,ActorClass,SkinClass,SceneClass,PrimitiveClass,
     NumBones,BoneName,BoneIndex,SocketLocation,SocketRotation,Linear,Angular,SetLinear,SetAngular,
     Attach,Position,Collision,AllSim,Sim,Blend,AnySim,Physics,Arm,Controller,AttachParent,ControlRotation,WorldRotation,AllLinear,
-    CrouchRoot,FinishSpawn,RelativeRotation,ComponentRotation,MainGraph,RagdollMode,WorldPose,ComponentLocation,RenderBlend,Count};
+    CrouchRoot,FinishSpawn,RelativeRotation,ComponentRotation,MainGraph,RagdollMode,WorldPose,ComponentLocation,RenderBlend,NotifyHits,NotifyAllHits,Count};
 struct Obj{int id=0,serial=1;bool live=true;std::array<uint8_t,4096> storage{};} objects[Count];
 struct Params{void* parent=nullptr;ue_wrap::reflection::FName bone{};int32_t index=0;
     uint8_t locationRule=0,rotationRule=0,scaleRule=0,collision=0;bool weld=false,simulate=false,sweep=false,teleport=false,skip=false;
@@ -23,16 +23,23 @@ std::function<void()> onAttach;std::wstring missingParam;
 ue_wrap::FRotator armRotation{},controlRotation{-35,385,0};void* armParent=nullptr;ue_wrap::FVector armPosition{30,40,50};
 int cameraWrites=0;std::function<void()> onRotation;float actorYaw=0;void* callerFunction=nullptr;
 std::map<int,ue_wrap::FVector> velocities;bool bodySim=true,renderBlending=false,meshTick=false;int velocityWrites=0;
+bool componentHits=false,allBodyHits=false,notifyFail=false;std::function<void()> onNotify;
 ue_wrap::ufunction_hook::PreNativeCallback velocityHook=nullptr;bool velocityArmed=false;
 void Put(void* obj,size_t off,void* value){std::memcpy(static_cast<uint8_t*>(obj)+off,&value,sizeof(value));}
 void Reset(){for(int i=0;i<Count;++i){objects[i].id=i;++objects[i].serial;objects[i].live=true;}
     Put(At(Player),0xc40,At(Body));Put(At(Body),0x230,At(Mesh));Put(At(Mesh),0x300,At(Asset));
     Put(At(Player),0x600,At(Arm));armParent=At(Mesh);armRotation={};controlRotation={-35,385,0};cameraWrites=0;onRotation={};
     Put(At(Player),0x610,At(CrouchRoot));Put(At(Body),0x248,At(Player));actorYaw=0;callerFunction=nullptr;
+    objects[Player].storage[16]=1;objects[Player].storage[17]=0;
     pelvis={0,0,10};origin={};lowest=0;positions=configurations=returnErrors=0;attached=false;attachOK=configuredOK=true;onAttach={};missingParam.clear();
-    velocities.clear();bodySim=true;renderBlending=meshTick=false;velocityWrites=0;}
+    velocities.clear();bodySim=true;renderBlending=meshTick=false;velocityWrites=0;
+    componentHits=allBodyHits=notifyFail=false;onNotify={};}
 }
 namespace ue_wrap::reflection {
+bool FindBoolProperty(void*,const wchar_t* name,int32_t& off,uint8_t& mask){
+    mask=1;if(!wcscmp(name,L"isRagdoll")){off=offsetof(test::Obj,storage)+16;return true;}
+    if(!wcscmp(name,L"isWakingUp")){off=offsetof(test::Obj,storage)+17;return true;}return false;
+}
 bool IsLive(void* p){return p && static_cast<test::Obj*>(p)->live;}
 int32_t InternalIndexOf(void* p){return p?static_cast<test::Obj*>(p)->id:-1;}
 int32_t SlotSerial(int32_t i){return test::objects[i].serial;}int32_t AllocateSlotSerial(int32_t i){return SlotSerial(i);}
@@ -45,7 +52,7 @@ void* FindClass(const wchar_t* name){using namespace test;if(!wcscmp(name,L"Skin
     if(!wcscmp(name,L"SceneComponent"))return At(SceneClass);if(!wcscmp(name,L"PrimitiveComponent"))return At(PrimitiveClass);return At(ActorClass);}
 void* FindFunction(void*,const wchar_t* name){using namespace test;
     const std::pair<const wchar_t*,Id> rows[]={{L"GetNumBones",NumBones},{L"GetBoneName",BoneName},{L"GetBoneIndex",BoneIndex},
-        {L"SetEnablePhysicsBlending",RenderBlend},{L"GetSocketLocation",SocketLocation},{L"GetSocketRotation",SocketRotation},{L"GetPhysicsLinearVelocity",Linear},
+        {L"SetEnablePhysicsBlending",RenderBlend},{L"SetNotifyRigidBodyCollision",NotifyHits},{L"SetNotifyRigidBodyCollisionBelow",NotifyAllHits},{L"GetSocketLocation",SocketLocation},{L"GetSocketRotation",SocketRotation},{L"GetPhysicsLinearVelocity",Linear},
         {L"GetPhysicsAngularVelocityInDegrees",Angular},{L"SetPhysicsLinearVelocity",SetLinear},
         {L"SetPhysicsAngularVelocityInDegrees",SetAngular},{L"K2_AttachToComponent",Attach},
         {L"K2_SetWorldLocation",Position},{L"SetCollisionEnabled",Collision},{L"SetAllBodiesSimulatePhysics",AllSim},
@@ -71,6 +78,8 @@ std::vector<ParamInfo> FunctionParams(void* fn){using namespace test;std::vector
     P("BoneIndex",index);P("BoneName",bone);P("InSocketName",bone);P("NewLocation",vector);P("bSweep",sweep);P("bTeleport",teleport);
     P("NewType",collision);P("bNewSimulate",simulate);P("bSimulate",simulate);P("PhysicsBlendWeight",weight);P("bSkipCustomPhysicsType",skip);
     P("bNewBlendPhysics",simulate);
+    P("bNewNotifyRigidBodyCollision",simulate);
+    P("bIncludeSelf",skip);
     P("NewVel",vector);P("NewAngVel",vector);P("bAddToCurrent",weld);
     P("NewPhysicsAsset",parent);P("bForceReInit",teleport);
     P("NewRotation",rotation);
@@ -82,6 +91,8 @@ std::vector<ParamInfo> FunctionParams(void* fn){using namespace test;std::vector
     return p;
 }
 bool CallFunction(void* object,void* fn,void* raw){using namespace test;auto& p=*static_cast<Params*>(raw);
+    if(fn==At(NotifyHits)){if(notifyFail)return false;componentHits=p.simulate;auto callback=std::move(onNotify);onNotify={};if(callback)callback();}
+    if(fn==At(NotifyAllHits)){CHECK(p.skip && p.bone.ComparisonIndex==1);allBodyHits=p.simulate;}
     if(fn==At(SetLinear) && velocityArmed && velocityHook &&
        velocityHook(object,object,static_cast<const uint8_t*>(raw))==ue_wrap::script_gate::Verdict::Cancel)return true;
     if(fn==At(NumBones))p.index=2;if(fn==At(BoneName))p.bone={p.index+1,0};
@@ -138,12 +149,37 @@ bool GetBoneWorldLocationByName(void*,const wchar_t*,FVector& out){out=test::pel
 FVector GetComponentLocation(void*){return test::origin;}
 }
 int main(int argc,char** argv){using namespace test;Reset();
+    if(argc>1 && std::string(argv[1])=="rapid"){
+        objects[Player].storage[17]=1;
+        CHECK(!ue_wrap::engine::RefreshLocalRagdollModel(At(Player)));CHECK(configurations==0 && !velocityArmed);
+        Reset();objects[Player].storage[16]=0;
+        CHECK(!ue_wrap::engine::RefreshLocalRagdollModel(At(Player)));CHECK(configurations==0 && !velocityArmed);
+        Reset();CHECK(!ue_wrap::engine::RefreshLocalRagdollModel(At(Player)));CHECK(configurations==1);
+        objects[Player].storage[17]=1;bodySim=false;
+        std::this_thread::sleep_for(std::chrono::milliseconds(35));
+        CHECK(!ue_wrap::engine::RefreshLocalRagdollModel(At(Player)));CHECK(!bodySim && !velocityArmed && configurations==1);
+        puts("PASS rapid recovery: no rig replacement or deferred physics restart during get-up/retirement");return 0;
+    }
+    if(argc>1 && std::string(argv[1])=="impacts"){
+        bodySim=false;CHECK(ue_wrap::engine::StartBodySim(At(Mesh),true));
+        CHECK(componentHits && allBodyHits && bodySim);
+        Reset();bodySim=false;CHECK(ue_wrap::engine::StartPlayerRagdollSimulation(At(Body)));
+        CHECK(!componentHits && !allBodyHits && bodySim); // Remote proxy behavior unchanged.
+        Reset();bodySim=false;missingParam=L"bNewNotifyRigidBodyCollision";
+        CHECK(!ue_wrap::engine::StartBodySim(At(Mesh),true));CHECK(!componentHits && !allBodyHits && !bodySim);
+        Reset();bodySim=false;notifyFail=true;CHECK(!ue_wrap::engine::StartBodySim(At(Mesh),true));
+        CHECK(!allBodyHits && !bodySim);
+        Reset();bodySim=false;onNotify=[] {++objects[Mesh].serial;};
+        CHECK(!ue_wrap::engine::StartBodySim(At(Mesh),true));CHECK(!allBodyHits && !bodySim);
+        puts("PASS local ragdoll impacts: component/all-body notifications, remote exclusion, metadata/call failure and recycled component guards");return 0;
+    }
     if(argc>1 && std::string(argv[1])=="transition"){
         Put(At(Player),0xc40,nullptr);armParent=At(CrouchRoot);initial={};
         CHECK(!ue_wrap::engine::RefreshLocalRagdollModel(At(Player)));
         callerFunction=At(RagdollMode);
         ue_wrap::engine::OnLocalRagdollConstructed(nullptr,At(Player),At(Body));
         CHECK(configurations==1 && bodySim && renderBlending && meshTick && !velocityArmed);
+        CHECK(componentHits && allBodyHits);
         Put(At(Player),0xc40,At(Body));armParent=At(Mesh);armRotation={0,-90,0};
         ue_wrap::engine::OnNativeRagdollArmRotation(At(Arm),At(Player),nullptr);
         CHECK(armRotation.Yaw==385 && !ue_wrap::engine::g_entryViewPending);
@@ -157,7 +193,7 @@ int main(int argc,char** argv){using namespace test;Reset();
             const auto beforePosition=armPosition;
             ue_wrap::engine::OnNativeRagdollArmAttached(At(Arm),At(Player),nullptr);
             CHECK(actorYaw==yaw && controlRotation.Yaw==yaw && armRotation.Yaw==yaw && armRotation.Roll==35);
-            CHECK(armPosition.X==beforePosition.X && armPosition.Y==beforePosition.Y && armPosition.Z==beforePosition.Z);
+            CHECK(armPosition.X==-beforePosition.Y && armPosition.Y==beforePosition.X && armPosition.Z==beforePosition.Z);
             // Native timeline levels pitch/roll, then clears relative rotation.
             // It now reads the same yaw, instead of forcing the old -90 heading.
             controlRotation={0,actorYaw,0};CHECK(controlRotation.Yaw==yaw);

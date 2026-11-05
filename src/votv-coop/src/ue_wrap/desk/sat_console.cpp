@@ -67,10 +67,9 @@ bool BindingsCurrent(){
 }
 
 bool LayoutCurrent() {
-    if(!g_resolved || !std::all_of(g_layoutRefs.begin(),g_layoutRefs.end(),[](const CachedObjRef& ref){return ref.Get()!=nullptr;}))return false;
-    if(!BindingsCurrent())return false;
-    return g_resolved && std::all_of(g_layoutRefs.begin(),g_layoutRefs.end(),
-        [](const CachedObjRef& ref){return ref.Get()!=nullptr;}) && BindingsCurrent();
+    if (!g_resolved || !std::all_of(g_layoutRefs.begin(), g_layoutRefs.end(), [](const CachedObjRef& ref){return ref.Get()!=nullptr;}))
+        return false;
+    return BindingsCurrent();
 }
 
 void ResetLayout() {

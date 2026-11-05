@@ -18,6 +18,8 @@
 #include "coop/net/session.h"
 
 #include "ue_wrap/core/call.h"
+#include "ue_wrap/actors/hoel_ufo.h"
+#include "coop/world/spawn_authority.h"
 #include "ue_wrap/engine/engine.h"
 #include "ue_wrap/engine/engine_physics.h"  // StopActorSimulating
 #include "ue_wrap/core/log.h"
@@ -40,6 +42,19 @@ namespace E = ue_wrap::engine;
 namespace D = coop::world_actor_sync::detail;
 
 using coop::element::WaMirrors;
+
+bool NeutralizeShot(void* actor) {
+    constexpr const wchar_t* fields[] = {L"pointDamage",L"pointForce",L"explosion_damage",L"explosion_force",L"explosion_radius"};
+    int32_t offsets[5]{};
+    for (size_t i=0;i<5;++i) {
+        std::wstring type;
+        if (!R::PropertyOffsetAndClass(R::ClassOf(actor),fields[i],offsets[i],type) ||
+            offsets[i]<0 || type!=L"FloatProperty") return false;
+    }
+    const float zero=0;
+    for (int32_t off:offsets) std::memcpy(static_cast<uint8_t*>(actor)+off,&zero,sizeof(zero));
+    return true;
+}
 
 }  // namespace
 
@@ -92,6 +107,15 @@ void OnWorldActorSpawn(const coop::net::WorldActorSpawnPayload& payload) {
                 classW.c_str(), payload.elementId);
         return;
     }
+    ue_wrap::FVector beamEndpoint{};
+    if (classW == L"hoelUfoAttack_C") {
+        if (!ue_wrap::hoel_ufo::DecodeEndpoint(payload.birth,payload.birthLen,beamEndpoint) ||
+            !coop::spawn_authority::HoelMirrorGatesReady(true)) {
+            UE_LOGW("hoel-ufo: refused beam eid=%u (endpoint or no-damage gate unavailable)",payload.elementId);
+            return;
+        }
+    }
+    if (classW == L"HoelUfo_C" && !coop::spawn_authority::HoelMirrorGatesReady(false)) return;
     // Duplicate-eid guard. A row whose actor is dead is not a duplicate, it is a stale row: a
     // mirror row outlives its actor by design (the death watch retires the row on a later tick),
     // so testing row presence alone answered a legitimate re-announce of a live host actor with
@@ -198,6 +222,19 @@ void OnWorldActorSpawn(const coop::net::WorldActorSpawnPayload& payload) {
     // "different" and not "always wrong". We set the input and let the game paint; nothing here
     // touches a material. Class-scoped: the coin lane owns the coin specifics. A zero length means leave the default alone: writing zero would be an
     // invisible fail-open, painting bronze exactly like the bug.
+    if (classW == L"tentacleBallShot_C" || classW == L"kavotiaShot_C") {
+        // Zero pointDamage before FinishSpawningActor runs ReceiveBeginPlay so the
+        // mirror traces and paints eff_tentacleBallShoot to the hit point, then
+        // skips both native addDamage and AddForceAtLocation (EX_JumpIfNot on
+        // pointDamage > 0.0). explosion_sync dissolves the child explosion_C on
+        // the client; zeroing explosion_* fields here is defense-in-depth.
+        const bool harmless = NeutralizeShot(spawned);
+        if (!harmless) {
+            UE_LOGE("world-actor: refused shot mirror eid=%u: cosmetic damage guard unavailable", payload.elementId);
+            if (sp.k2DestroyFn && R::IsLive(spawned)) R::CallFunction(spawned, sp.k2DestroyFn, nullptr);
+            return;
+        }
+    }
     if (classW == L"baocoin_C" && payload.birthLen != 0) {
         if (payload.birthLen != sizeof(int32_t)) {
             UE_LOGW("world-actor[client OnSpawn]: baocoin_C eid=%u birthLen=%u, expected %zu -- "
@@ -227,6 +264,11 @@ void OnWorldActorSpawn(const coop::net::WorldActorSpawnPayload& payload) {
         }
     }
 
+    if (classW == L"hoelUfoAttack_C" && !ue_wrap::hoel_ufo::PaintBeam(spawned,beamEndpoint)) {
+        if (sp.k2DestroyFn && R::IsLive(spawned)) R::CallFunction(spawned,sp.k2DestroyFn,nullptr);
+        UE_LOGW("hoel-ufo: beam paint failed, destroyed mirror eid=%u",payload.elementId);
+        return;
+    }
     const coop::element::ElementId eid = static_cast<coop::element::ElementId>(payload.elementId);
     if (!coop::element::CreateOrAdoptWorldActorMirror(eid, spawned, classW, /*senderSlot=*/-1)) {
         UE_LOGW("world-actor[client OnSpawn]: CreateOrAdoptWorldActorMirror(eid=%u) failed -- destroying orphan actor %p",
@@ -238,7 +280,12 @@ void OnWorldActorSpawn(const coop::net::WorldActorSpawnPayload& payload) {
     // movement-component read; a world actor is a plain actor). Any residual component tick is
     // overwritten each frame by the pose drive's location and rotation writes (the MTA
     // dead-reckoning model).
-    E::SetActorTickEnabled(spawned, false);
+    // Hoel's native tick animates its orbiting light balls. Its attacks are
+    // refused separately; host pose still overwrites its cosmetic root movement.
+    // tentacleBallShot_C and kavotiaShot_C have no ReceiveTick and a 2s InitialLifeSpan,
+    // but their ReceiveBeginPlay schedules Delay(0.0) in the actor's FLatentActionManager
+    // to run the forward line-trace and SetBeamTargetPoint on the next actor tick.
+    E::SetActorTickEnabled(spawned, classW == L"HoelUfo_C" || classW == L"tentacleBallShot_C" || classW == L"kavotiaShot_C");
     // A pose-driven mirror must not also simulate: the two fight and the mirror drifts off the
     // host's transform. The coin simulates with its sphere and the jellyfish with its capsule, each its
     // root; whatever component a mirrored class simulates with is stopped, found from its members.
@@ -350,6 +397,23 @@ void TickClientWorldActors() {
     for (coop::element::WorldActor* el : elems) {
         if (!el || !el->IsMirror()) continue;
         el->Tick();
+        if(el->GetTypeName()=="hoelUfoAttack_C") {
+            void* actor=el->GetActor();
+            if(actor && R::IsLiveByIndex(actor,el->GetInternalIdx())) {
+                ue_wrap::hoel_ufo::TickBeamPresentation(actor);
+                if (el->HasPose()) {
+                    float ax = 0.f, ay = 0.f, az = 0.f;
+                    el->CurrentAuxVec(ax, ay, az);
+                    if (std::isfinite(ax) && std::isfinite(ay) && std::isfinite(az) && (ax != 0.f || ay != 0.f || az != 0.f)) {
+                        ue_wrap::hoel_ufo::PaintBeam(actor, ue_wrap::FVector{ax, ay, az});
+                    }
+                }
+            }
+        }
+        if (el->HasPose() && el->GetTypeName() == "HoelUfo_C") {
+            // Re-apply host pose so local native movement cannot displace root transform
+            el->ApplyToEngine();
+        }
         // The pyramid's visible heading lives in its arrow components and its head look target in
         // its relative look; neither is the actor transform the generic drive writes, so hand the
         // interpolated or latest values to the lane.

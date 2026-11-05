@@ -56,7 +56,7 @@ struct CallerFrame {
 };
 CallerFrame CurrentCallerFrame();
 
-// The result storage of the call a post callback is reporting, the native function's RESULT_PARAM.
+// The result storage of a post callback or an opt-in returning pre callback, the native function's RESULT_PARAM.
 // The caller reads it once the callback returns, so a callback that writes a value of the
 // function's return type there answers the call with that value: how a seam gives a read a
 // Blueprint makes of an object the answer that object stands in for. Null outside any callback
@@ -108,6 +108,14 @@ using PreNativeCallback = script_gate::Verdict (*)(void* context, void* sourceOb
 // never reports a call its pre hook refused. `armed` defaults to false, the shape being a seam armed only
 // while a call of the consumer's own runs. Idempotent per (ufunction, cb). Game thread.
 bool InstallPreHook(const facts::Resolved& fn, PreNativeCallback cb, bool armed = false);
+
+// Explicit POD-return variant: exactly one reflected NoDestructor return of returnBytes (1..8).
+// Inputs retain all InstallPreHook guards; the return is not stepped as an input.
+// CurrentResult is zero-initialized before the pre callback; Cancel preserves its value.
+// Null result storage forwards untouched. A nested native call from the callback bypasses
+// all hook callbacks, allowing one replacement dispatch with revised POD parameters.
+bool InstallReturningPreHook(const facts::Resolved& fn, PreNativeCallback cb,
+                             int32_t returnBytes, bool armed = false);
 
 // Every installed patch, by function and kind. For coop/dev/dependency_dump; game thread.
 using HookVisitor = void (*)(void* ctx, void* ufunction, bool pre);

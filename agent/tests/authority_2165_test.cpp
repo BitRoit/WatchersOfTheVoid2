@@ -27,6 +27,9 @@ int fieldOffset=offsetof(Obj,rows);
 std::function<void()> onOffset;
 struct Watch { std::wstring cls,fn; int tag; ue_wrap::script_gate::PreFn pre; };
 std::vector<Watch> watches;
+bool watchesLive=true;
+bool resolveWatches=false;
+int resolveCalls=0;
 ue_wrap::script_gate::Verdict Dispatch(const wchar_t* c,const wchar_t* fn,void* object,bool ours=false) {
     using namespace ue_wrap::script_gate;
     for(auto& w:watches)if(w.cls==c&&w.fn==fn) {
@@ -55,6 +58,12 @@ void* WorldOf(void* o){return o==&test::slot && !test::worldlessSlot?test::world
 namespace ue_wrap::log { void Write(Level,const char*,...){} }
 namespace ue_wrap::script_gate {
 bool WatchClassName(const wchar_t* cls,const wchar_t* fn,int tag,PreFn pre,PostFn){test::watches.push_back({cls,fn,tag,pre});return true;}
+void ResolvePendingNames(){++test::resolveCalls;if(test::resolveWatches)test::watchesLive=true;}
+bool ClassNameWatchLive(const wchar_t* cls,const wchar_t* fn,int tag){
+    if(!test::watchesLive)return false;
+    for(const auto& w:test::watches)if(w.cls==cls&&w.fn==fn&&w.tag==tag)return true;
+    return false;
+}
 }
 
 int main(){
@@ -68,6 +77,17 @@ int main(){
     CHECK(Dispatch(L"impostorPropsMaster_C",L"gen",&slot)==V::Run);
     CHECK(Dispatch(L"ticker_flickerer_C",L"ReceiveTick",&slot)==V::Run);
     s.mode=coop::net::Role::Client;s.linked=false; // active loading window
+    CHECK(M::HoelMirrorGatesReady(false)&&M::HoelMirrorGatesReady(true));
+    CHECK(resolveCalls==0);
+    watchesLive=false;resolveWatches=true;CHECK(M::HoelMirrorGatesReady(false));CHECK(resolveCalls==1);resolveWatches=false;
+    watchesLive=false;CHECK(!M::HoelMirrorGatesReady(false)&&!M::HoelMirrorGatesReady(true));watchesLive=true;
+    for(const auto* fn:{L"attack",L"attackBeam"})CHECK(Dispatch(L"HoelUfo_C",fn,&slot)==V::Cancel);
+    CHECK(Dispatch(L"superFog_C",L"spawnUfo",&slot)==V::Cancel);
+    CHECK(Dispatch(L"wMannequinSpawn_C",L"spawn",&slot)==V::Cancel);
+    CHECK(Dispatch(L"wMannequinSpawn_C",L"prepareSpawn",&slot)==V::Cancel);
+    CHECK(Dispatch(L"hoelUfoAttack_C",L"ReceiveBeginPlay",&slot,true)==V::Cancel);
+    CHECK(Dispatch(L"HoelUfo_C",L"ReceiveBeginPlay",&slot,true)==V::Run);
+    CHECK(Dispatch(L"HoelUfo_C",L"ReceiveTick",&slot)==V::Run);
     CHECK(Dispatch(L"ticker_flickerer_C",L"ReceiveTick",&slot)==V::Cancel);
     CHECK(Dispatch(L"ticker_flickerer_C",L"ReceiveTick",&slot,true)==V::Cancel);
     CHECK(Dispatch(L"ticker_flickerer_C",L"intComs_gamemodeBeginPlay",&slot)==V::Run);
@@ -101,9 +121,13 @@ int main(){
     CHECK(Dispatch(L"prop_impostor_C",L"ReceiveBeginPlay",&slot)==V::Run);
     CHECK(Dispatch(L"prop_C",L"ReceiveTick",&slot)==V::Run);
     s.active=false;CHECK(Dispatch(L"impostorPropsMaster_C",L"gen",&slot)==V::Run);
+    CHECK(!M::HoelMirrorGatesReady(true));
+    CHECK(Dispatch(L"hoelUfoAttack_C",L"ReceiveBeginPlay",&slot)==V::Run);
     CHECK(Dispatch(L"ticker_flickerer_C",L"ReceiveTick",&slot)==V::Run);
     CHECK(Dispatch(L"prop_impostor_C",L"ReceiveTick",&slot)==V::Run);
     s.active=true;s.mode=coop::net::Role::Host;CHECK(Dispatch(L"prop_impostor_C",L"ReceiveTick",&slot)==V::Run);
+    CHECK(!M::HoelMirrorGatesReady(false));
+    CHECK(Dispatch(L"HoelUfo_C",L"attackBeam",&slot)==V::Run);
     CHECK(Dispatch(L"ticker_flickerer_C",L"ReceiveTick",&slot)==V::Run);
     E::OnDisconnect();s.mode=coop::net::Role::Client;Tick();CHECK(slot.rows.num==3);
     reset();Tick();slot.cls=&otherClass;E::OnDisconnect();CHECK(slot.rows.num==0);slot.cls=&cls;

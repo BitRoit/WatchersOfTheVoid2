@@ -137,7 +137,14 @@ bool SendEnd(coop::net::Session& s, const Driven& d, void* actor, const ue_wrap:
 Driven* Open(void* actor, bool claimed, const char* why) {
     if (!PR::IsDescendantOfProp(actor)) return nullptr;
     if (InAHand(actor)) return nullptr;   // the held-prop lane owns a prop in a hand
-    const coop::element::ElementId eid = coop::prop_element_tracker::GetPropElementIdForActor(actor);
+    coop::element::ElementId eid = coop::prop_element_tracker::GetPropElementIdForActor(actor);
+    if (eid == coop::element::kInvalidId || eid == 0u) {
+        const std::wstring key = PR::GetInteractableKeyString(actor);
+        coop::prop_element_tracker::MarkPropElement(
+            actor, (key == L"None") ? std::wstring() : key, R::ClassNameOf(actor),
+            coop::prop_element_tracker::EnrollSource::kPassiveCensus);
+        eid = coop::prop_element_tracker::GetPropElementIdForActor(actor);
+    }
     if (eid == coop::element::kInvalidId || eid == 0u) {
         // A feeder asks again every pass while the tie holds, so the line is per actor, not per pass.
         static void* sRefusedSaid = nullptr;

@@ -23,6 +23,7 @@ void* g_sceneCompClass = nullptr;
 void* g_setVisFn = nullptr;
 void* g_setHiddenFn = nullptr;
 void* g_getCompLocFn = nullptr;
+void* g_setAbsoluteFn = nullptr;
 
 void* SceneCompClass() {
     if (!g_sceneCompClass) g_sceneCompClass = R::FindClass(P::name::SceneComponentClass);
@@ -151,6 +152,19 @@ FVector GetComponentLocation(void* component) {
     FVector loc;
     TryGetComponentLocation(component, loc);
     return loc;
+}
+
+bool SetComponentAbsolute(void* sceneComponent, bool absLoc, bool absRot, bool absScale) {
+    if (!sceneComponent || !R::IsLive(sceneComponent) || !SceneCompClass()) return false;
+    if (!g_setAbsoluteFn)
+        g_setAbsoluteFn = R::FindFunction(g_sceneCompClass, P::name::SetAbsoluteFn);
+    if (!g_setAbsoluteFn) return false;
+    ParamFrame f(g_setAbsoluteFn);
+    if (!f.valid() ||
+        !f.Set<bool>(L"bNewAbsoluteLocation", absLoc) ||
+        !f.Set<bool>(L"bNewAbsoluteRotation", absRot) ||
+        !f.Set<bool>(L"bNewAbsoluteScale", absScale)) return false;
+    return Call(sceneComponent, f);
 }
 
 FVector GetComponentRelativeLocation(void* component) {
@@ -382,6 +396,18 @@ void* GetStaticMeshComponent(void* actor) {
         }
     }
     return nullptr;
+}
+
+bool DeactivateComponent(void* component) {
+    if (!component || !R::IsLive(component)) return false;
+    static void* sFn = nullptr;
+    if (!sFn) {
+        void* acc = R::FindClass(P::name::ActorComponentClass);
+        if (acc) sFn = R::FindFunction(acc, L"Deactivate");
+    }
+    if (!sFn) return false;
+    ParamFrame f(sFn);
+    return Call(component, f);
 }
 
 bool SetComponentTickEnabled(void* component, bool enabled) {

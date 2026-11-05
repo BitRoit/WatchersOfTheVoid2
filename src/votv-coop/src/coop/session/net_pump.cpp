@@ -311,8 +311,14 @@ void Tick(coop::net::Session& session) {
         ~TickDurLog() {
             const long long ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - t0).count();
-            if (ms >= 10)
-                UE_LOGI("[HITCH-SRC] net_pump::Tick itself = %lld ms (OUR code caused this frame's cost)", ms);
+            if (ms >= 35) {
+                static auto sLastLog = std::chrono::steady_clock::time_point{};
+                const auto now = std::chrono::steady_clock::now();
+                if (now - sLastLog >= std::chrono::milliseconds(500)) {
+                    sLastLog = now;
+                    UE_LOGI("[HITCH-SRC] net_pump::Tick itself = %lld ms (OUR code caused this frame's cost)", ms);
+                }
+            }
         }
     } _tickDurLog;
 

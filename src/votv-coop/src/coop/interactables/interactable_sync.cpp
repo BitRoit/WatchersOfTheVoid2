@@ -90,6 +90,7 @@ const Adapter g_lightAdapter = {
     // (coop/interactables/lightgroup_verbs). On the host the full use() runs: replaying the client's
     // switch edge is how its press becomes an authoritative group change.
     [](void* a, bool /*on*/) -> bool { return ue_wrap::lightswitch::CallUse(a); },
+    nullptr, nullptr, nullptr, false, true, // accept cooked identities without a native save Key
 };
 // The light group (Atrigger_lightRoot_C), the state a player sees. The switch adapter syncs the
 // switch's `a`, this one the group's isActive: the game keeps them decoupled (use() toggles `a`
@@ -118,6 +119,7 @@ const Adapter g_lightGroupAdapter = {
         return ue_wrap::lightswitch::ApplyGroupState(a, on);
     },
     nullptr,  // no TickApply: runTrigger lands the state in its own body
+    nullptr, nullptr, false, true, // same keyless placed-actor boundary as its switch
 };
 const Adapter g_containerAdapter = {
     "container", coop::net::ReliableKind::ContainerState,

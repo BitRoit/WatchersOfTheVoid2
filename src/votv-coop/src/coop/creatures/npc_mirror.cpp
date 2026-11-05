@@ -3,6 +3,7 @@
 // drains, the ghost sweep and the per-tick pose drive. See coop/creatures/npc_mirror.h.
 
 #include "coop/creatures/npc_mirror.h"
+#include "coop/creatures/npc_spawn_pending.h"
 #include "rufus_birth_guard.h"
 
 #include "coop/element/mirror_manager.h"
@@ -22,6 +23,8 @@
 #include "coop/creatures/npc_sync.h"
 #include "coop/world/creature_event_relay.h"  // OnMirrorBound: the host's event count for a new mirror
 #include "ue_wrap/core/call.h"
+#include "ue_wrap/core/asset_load.h"
+#include "ue_wrap/engine/world_identity.h"
 #include "ue_wrap/engine/engine.h"
 #include "ue_wrap/actors/kerfur.h"  // NeutralizeAiTimers
 #include "ue_wrap/actors/spawner_stamp.h"
@@ -33,6 +36,7 @@
 #include "ue_wrap/core/types.h"
 
 #include <cmath>
+#include <chrono>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -59,6 +63,19 @@ void*    g_stampDropClass   = nullptr;
 uint64_t g_stampDropListing = 0;
 
 using coop::element::NpcMirrors;   // canonical accessor (coop/element/mirror_managers.h)
+coop::npc_spawn_pending::Queue g_pendingSpawns;
+uint64_t g_nextRetryMs = 0, g_nextClassLoadMs = 0;
+uint64_t NowMs() {
+    return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count());
+}
+void QueueSpawn(const coop::net::EntitySpawnPayload& p) {
+    const bool existed = g_pendingSpawns.Find(p.elementId) != nullptr;
+    if (!g_pendingSpawns.Put(p, NowMs()))
+        UE_LOGW("npc-mirror: pending spawn capacity reached; refused eid=%u", p.elementId);
+    else if (!existed)
+        UE_LOGI("npc-mirror: awaiting class/world readiness eid=%u (15s bounded retry)", p.elementId);
+}
 
 // A save-persisted NPC the joining client also loaded from the transferred save is adopted by
 // class match through npc_adoption's deferred poll: the local twin spawns on an invisible path
@@ -82,7 +99,11 @@ void SetClientRefs(const ClientRefs& refs) {
 void OnEntitySpawn(const coop::net::EntitySpawnPayload& payload) {
     using ue_wrap::ParamFrame;
     using ue_wrap::Call;
-    if (!coop::npc_sync::GetSession()) return;
+    auto* session = coop::npc_sync::GetSession();
+    if (!session || !session->connected() || session->role() != coop::net::Role::Client) return;
+    const auto worldGeneration = ue_wrap::world_identity::Generation();
+    auto current = [&] { return session == coop::npc_sync::GetSession() && session->connected() &&
+        session->role() == coop::net::Role::Client && worldGeneration == ue_wrap::world_identity::Generation(); };
     // EntitySpawn is host-authoritative: the host's receive edge refuses a client's copy
     // (client_authorship.h), and the host never receives its own broadcasts. The eid must be in the
     // host range.
@@ -124,24 +145,34 @@ void OnEntitySpawn(const coop::net::EntitySpawnPayload& payload) {
     // broadcast by design (the joiner's world is re-derived whole, not diffed), so an eid already
     // mirrored is that re-send, and a second install would duplicate the actor. An unlocked early
     // exit; a race past it is caught by the install failure path below, which destroys the orphan.
-    if (NpcMirrors().Get(payload.elementId) != nullptr) {
-        UE_LOGW("npc-sync[client OnSpawn]: eid=%u already mirrored locally -- dropping duplicate",
-                payload.elementId);
-        return;
+    if (auto* existing = NpcMirrors().Get(payload.elementId)) {
+        if (!existing->IsMirror() || existing->LiveActor()) {
+            g_pendingSpawns.Erase(payload.elementId);
+            return;
+        }
+        // A dead world actor must not permanently reserve this host identity.
+        auto stale = NpcMirrors().Take(payload.elementId);
     }
     // The actor class. NPC classes load with the level; unloaded, the packet is dropped and this
     // spawn is gone.
     void* actorClass = R::FindClass(classW.c_str());
+    if (!actorClass && E::GetWorldContext() && NowMs() >= g_nextClassLoadMs) {
+        if (const auto* path = coop::npc_spawn_pending::ClassPath(classW)) {
+            g_nextClassLoadMs = NowMs() + 100;
+            (void)ue_wrap::asset_load::LoadObjectByPath(path);
+            if (!current()) return;
+            actorClass = R::FindClass(classW.c_str());
+        }
+    }
     if (!actorClass) {
-        UE_LOGW("npc-sync[client OnSpawn]: class '%ls' not found in GUObjectArray -- dropping "
-                "(BP class not loaded? eid=%u)",
-                classW.c_str(), payload.elementId);
+        QueueSpawn(payload);
         return;
     }
     // The allowlist gate: a peer could send any className, so only subclasses of the NPC bases
     // materialise. An event creature's class may have loaded after the last late resolve.
     coop::npc_sync::RefreshLateAllowlist();
     if (!coop::npc_sync::IsAllowlistedClass(actorClass)) {
+        g_pendingSpawns.Erase(payload.elementId);
         UE_LOGW("npc-sync[client OnSpawn]: class '%ls' is NOT on NPC allowlist -- "
                 "rejecting (eid=%u; peer is broadcasting non-NPC EntitySpawn?)",
                 classW.c_str(), payload.elementId);
@@ -160,17 +191,25 @@ void OnEntitySpawn(const coop::net::EntitySpawnPayload& payload) {
     // random per peer and class plus untracked-local is the only portable identity. Otherwise a
     // host-spawned transient the client has no copy of: a fresh mirror now.
     if (payload.savePersisted) {
+        g_pendingSpawns.Erase(payload.elementId);
         coop::npc_adoption::ArmAdoption(payload.elementId, classW, actorClass,
                                         payload.locX, payload.locY, payload.locZ,
                                         payload.rotPitch, payload.rotYaw, payload.rotRoll);
         return;
     }
-    SpawnFreshNpcMirror(classW, actorClass, payload.elementId,
+    const bool spawned = SpawnFreshNpcMirror(classW, actorClass, payload.elementId,
                         payload.locX, payload.locY, payload.locZ,
                         payload.rotPitch, payload.rotYaw, payload.rotRoll,
                         coop::net::SanitizeWireScaleAxis(payload.scaleX),
                         coop::net::SanitizeWireScaleAxis(payload.scaleY),
                         coop::net::SanitizeWireScaleAxis(payload.scaleZ));
+    if (!current()) return;
+    if (spawned) {
+        if (const auto* pending = g_pendingSpawns.Find(payload.elementId))
+            if (pending->hasPose)
+                if (auto* mirror = NpcMirrors().Get(payload.elementId)) mirror->SetTargetNpcPose(pending->pose);
+        g_pendingSpawns.Erase(payload.elementId);
+    } else QueueSpawn(payload);
 }
 
 bool SpawnFreshNpcMirror(const std::wstring& classW, void* actorClass, uint32_t elementId,
@@ -370,6 +409,7 @@ bool SpawnFreshNpcMirror(const std::wstring& classW, void* actorClass, uint32_t 
 
 void OnEntityDestroy(const coop::net::EntityDestroyPayload& payload) {
     if (!coop::npc_sync::GetSession()) return;
+    g_pendingSpawns.Erase(payload.elementId);
     // The host-range gate.
     if (!coop::element::Registry::IsAllowedHostAllocatedEid(payload.elementId)) {
         UE_LOGW("npc-sync[client OnDestroy]: elementId=%u out of allowed host range "
@@ -415,6 +455,8 @@ void OnEntityDestroy(const coop::net::EntityDestroyPayload& payload) {
 }
 
 void DrainClientMirrors() {
+    g_pendingSpawns.Clear();
+    g_nextRetryMs = g_nextClassLoadMs = 0;
     // Drains the one MirrorManager<Npc> for both roles: on a client it holds the mirrors (destroyed
     // and unregistered), on the host the host's own Npc Elements (released only; the real NPCs
     // stay). The IsMirror gate below makes that correct; a process holds one kind or the other. The
@@ -460,6 +502,8 @@ void DrainClientMirrors() {
 }
 
 void PruneDeadClientMirrors() {
+    g_pendingSpawns.Clear();
+    g_nextRetryMs = g_nextClassLoadMs = 0;
     // The client world-swap teardown. A world gets one save replay, before its announce, and a mirror
     // installed in a world since left survives the swap as a dangling Element: the host sends no
     // EntityDestroy for a client swap, and the disconnect drain is full-disconnect only. The stale
@@ -547,6 +591,15 @@ int DestroyUntrackedClientNpcs() {
 void TickClientNpcs() {
     auto* s = coop::npc_sync::GetSession();
     if (!s || s->role() == coop::net::Role::Host) return;  // client-only (the host streams, it doesn't drive mirrors)
+    if (s->connected() && NowMs() >= g_nextRetryMs) {
+        g_nextRetryMs = NowMs() + 100;
+        const auto ready = g_pendingSpawns.Ready(NowMs());
+        for (const auto& row : ready) {
+            // A reentrant disconnect/destroy from the previous spawn cancels its queued siblings.
+            if (!g_pendingSpawns.Find(row.spawn.elementId)) continue;
+            OnEntitySpawn(row.spawn);
+        }
+    }
 
     // 1. The latest batch, if any: an interpolation window per NPC. Per-entry validation is the
     // trust boundary.
@@ -568,6 +621,7 @@ void TickClientNpcs() {
             // The body yaw: garbage must not reach K2_SetWorldRotation.
             if ((snap.stateBits & coop::net::kEntityPoseBitHasBodyYaw) &&
                 (!std::isfinite(snap.bodyYaw) || std::fabs(snap.bodyYaw) > 1.0e6f)) continue;
+            g_pendingSpawns.Pose(snap);
             coop::element::Npc* el = NpcMirrors().Get(snap.elementId);
             if (!el || !el->IsMirror()) continue;  // not materialized yet (connect gap) / defensive
             el->SetTargetNpcPose(snap);

@@ -26,13 +26,18 @@ long long TraceNowMs() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count();
 }
+bool g_worldActorBatchConsumed = true;
 }  // namespace
 
 namespace coop::net {
 
 void Session::SetLocalWorldActorPoseBatch(const std::vector<WorldActorPoseSnapshot>& batch) {
     std::lock_guard<std::mutex> lk(localMutex_);
-    outbound_.worldActorBatch = batch;  // empty -> nothing to fan out (actors gone); the copy reuses the capacity
+    if (batch.empty() && !g_worldActorBatchConsumed && !outbound_.worldActorBatch.empty()) {
+        return;
+    }
+    outbound_.worldActorBatch = batch;
+    g_worldActorBatchConsumed = false;
 }
 
 bool Session::TakeRemoteWorldActorBatch(std::vector<WorldActorPoseSnapshot>& out) {
@@ -46,6 +51,7 @@ int Session::SerializeLocalWorldActorBatch(uint8_t* buf) {
     // per-peer. Only the HOST ever populates outbound_.worldActorBatch, so on a client this returns 0.
     std::lock_guard<std::mutex> lk(localMutex_);
     if (outbound_.worldActorBatch.empty()) return 0;
+    g_worldActorBatchConsumed = true;
     size_t n = outbound_.worldActorBatch.size();
     if (n > static_cast<size_t>(kMaxWorldActorBatchEntries)) n = kMaxWorldActorBatchEntries;  // cap (TickPoseStream already caps)
     // [WA-TRACE host-serialize] 1 Hz: what the net thread actually fans out this second. If
@@ -105,11 +111,26 @@ void Session::StoreRemoteWorldActorBatch(const void* data, int len, uint32_t seq
     }
     if (!fresh && static_cast<int32_t>(seq - s_newestStored) <= 0) ++s_olderStored;
     else s_newestStored = seq;
-    batch->resize(static_cast<size_t>(count));
-    if (count > 0)
-        std::memcpy(batch->data(),
-                    static_cast<const uint8_t*>(data) + sizeof(PacketHeader) + sizeof(EntityPoseBatchHeader),
-                    static_cast<size_t>(count) * sizeof(WorldActorPoseSnapshot));
+    const auto* incoming = reinterpret_cast<const WorldActorPoseSnapshot*>(
+        static_cast<const uint8_t*>(data) + sizeof(PacketHeader) + sizeof(EntityPoseBatchHeader));
+    if (fresh || batch->empty()) {
+        batch->assign(incoming, incoming + count);
+    } else {
+        for (int i = 0; i < count; ++i) {
+            const auto& snap = incoming[i];
+            bool found = false;
+            for (auto& existing : *batch) {
+                if (existing.elementId == snap.elementId) {
+                    existing = snap;
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                batch->push_back(snap);
+            }
+        }
+    }
     const long long nowMs = TraceNowMs();
     if (nowMs - s_lastMs >= 1000 && count > 0) {
         s_lastMs = nowMs;

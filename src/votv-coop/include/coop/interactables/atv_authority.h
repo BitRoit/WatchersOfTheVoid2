@@ -86,6 +86,7 @@ struct Counters {
 Counters ReadCounters();
 
 // The teardown line (nothing when nothing was judged), then the table's counters, buckets and refusal log clear.
+void OnDisconnectForSlot(int slot);
 void LogSummary();
 void Reset();
 

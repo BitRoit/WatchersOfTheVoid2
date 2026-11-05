@@ -9,6 +9,8 @@
 #include "ue_wrap/core/call.h"
 #include "ue_wrap/engine/engine.h"
 #include "ue_wrap/engine/engine_attach.h"
+#include "ue_wrap/engine/engine_component.h"
+#include "ue_wrap/engine/engine_mainplayer.h"
 #include "ue_wrap/core/log.h"
 #include "ue_wrap/core/reflection.h"
 #include "ue_wrap/world/world_singleton.h"
@@ -168,12 +170,19 @@ static void* SpawnPuppetMainPlayer(const FVector& loc,
     // Cached for GetSkeletalMeshComponent.
     g_meshComp[actor].Set(meshComp);  // fresh from the spawn path
 
-    // The orphan's CharacterMovementComponent tick disabled: its gravity and walking integration
-    // would fight the wire-driven SetActorLocation writes, and the anim drive owns CMC.Velocity and
-    // MovementMode per tick.
+    // The orphan's CharacterMovementComponent tick disabled and deactivated: its gravity,
+    // walking integration, and capsule floor sweeps would fight the wire-driven SetActorLocation
+    // writes, and the anim drive owns CMC.Velocity and MovementMode per tick.
     if (void* cmc = ReadPtr(actor, P::off::ACharacter_CharacterMovement)) {
         E::SetComponentTickEnabled(cmc, false);
-        UE_LOGI("puppet[MainPlayer]: disabled orphan CMC tick @ %p (puppet driven by SetActorLocation, not physics)", cmc);
+        E::DeactivateComponent(cmc);
+        WriteAt<uint8_t>(cmc, P::off::UCharacterMovement_MovementMode, 0); // MOVE_None
+        UE_LOGI("puppet[MainPlayer]: disabled orphan CMC tick + deactivated @ %p", cmc);
+    }
+    static R::InstanceOffset cmcOff{L"CharMoveComp"};
+    if (void* cmc2 = ReadPtr(actor, cmcOff.Of(actor)); cmc2 && R::IsLive(cmc2)) {
+        E::SetComponentTickEnabled(cmc2, false);
+        E::DeactivateComponent(cmc2);
     }
     // The orphan's actor tick disabled: mainPlayer_C's ReceiveTick runs single-player logic each
     // frame (HUD updates, look traces, hunger and thirst, wind-sound placement), and branches
@@ -186,27 +195,134 @@ static void* SpawnPuppetMainPlayer(const FVector& loc,
     static R::InstanceOffset gravityOff{L"weaponComp_gravityGun"};
     if (void* gun=ReadPtr(actor,gravityOff.Of(actor)); gun && R::IsLive(gun)) {
         const bool stopped=E::SetComponentTickEnabled(gun,false);
+        E::DeactivateComponent(gun);
         UE_LOGI("puppet[MainPlayer]: gravity component tick disabled=%d",stopped);
     }
 
-    // Both PostProcessComponents destroyed: they drive the local camera's colour, exposure and
+    // Destroy and zero out heavy non-visual components that register with global engine systems:
+    // - NavigationInvoker: triggers Recast NavMesh dynamic tile rebuilding every time puppet moves
+    // - WidgetInteraction: runs 3D raycast traces into 3D UMG widgets in the world every tick
+    // - AIPerceptionStimuliSource: registers puppet into AI perception listener lists
+    auto destroyAndZero = [&](const wchar_t* compName) {
+        const int32_t off = R::FindPropertyOffset(R::ClassOf(actor), compName);
+        if (off >= 0) {
+            if (void* c = ReadPtr(actor, off); c && R::IsLive(c)) {
+                E::SetComponentTickEnabled(c, false);
+                E::DeactivateComponent(c);
+                E::DestroyComponent(c, actor);
+                UE_LOGI("puppet[MainPlayer]: destroyed and zeroed %ls @ %p", compName, c);
+            }
+            *reinterpret_cast<void**>(reinterpret_cast<uint8_t*>(actor) + off) = nullptr;
+        }
+    };
+    destroyAndZero(L"NavigationInvoker");
+    destroyAndZero(L"WidgetInteraction");
+    destroyAndZero(L"AIPerceptionStimuliSource");
+
+    // All 6 spring arms disabled: USpringArmComponent's UpdateDesiredArmLocation does collision
+    // sphere/line traces against world geometry every tick.
+    static const wchar_t* const kSpringArms[] = {
+        L"arms_lag", L"cameraLag", L"lag", L"lag1", L"lag_fl", L"lag_fl1"
+    };
+    for (const wchar_t* armName : kSpringArms) {
+        const int32_t off = R::FindPropertyOffset(R::ClassOf(actor), armName);
+        if (off >= 0) {
+            if (void* arm = ReadPtr(actor, off); arm && R::IsLive(arm)) {
+                E::SetComponentTickEnabled(arm, false);
+                E::DeactivateComponent(arm);
+            }
+        }
+    }
+
+    // Remote flashlight light_R is driven in world space by RemotePlayer::RefreshView. Its attached
+    // parent chain still moves every presentation update, so make location and rotation absolute:
+    // otherwise attachment propagation can briefly recompose the light into the puppet before
+    // RefreshView writes the next pose. Shadows remain off because, inside the third-person body,
+    // they self-occlude.
+    if (void* lightR = ReadPtr(actor, P::off::AmainPlayer_light_R); lightR && R::IsLive(lightR)) {
+        const bool shadows = E::SetLightCastShadows(lightR, false);
+        const bool absolute = E::SetComponentAbsolute(lightR, true, true, false);
+        E::SetLightAttenuationRadius(lightR, 5000.0f);
+        UE_LOGI("puppet[MainPlayer]: light_R shadows-off=%d absolute-loc-rot=%d @ %p",
+                shadows ? 1 : 0, absolute ? 1 : 0, lightR);
+    }
+
+    // Overlap and collision query volumes: disable collision and overlap events so they never
+    // perform PhysX broadphase/narrowphase queries against world objects.
+    static const wchar_t* const kOverlapVolumes[] = {
+        L"lookatBox", L"emf_sphere", L"precMesh_overlap"
+    };
+    for (const wchar_t* vName : kOverlapVolumes) {
+        const int32_t off = R::FindPropertyOffset(R::ClassOf(actor), vName);
+        if (off >= 0) {
+            if (void* v = ReadPtr(actor, off); v && R::IsLive(v)) {
+                E::SetComponentTickEnabled(v, false);
+                E::DeactivateComponent(v);
+                ParamFrame coll(R::FindDispatchFunctionCached(R::ClassOf(v), L"SetCollisionEnabled"));
+                if (coll.valid() && coll.Set<uint8_t>(L"NewType", 0)) {
+                    Call(v, coll);
+                }
+                ParamFrame overlap(R::FindDispatchFunctionCached(R::ClassOf(v), L"SetGenerateOverlapEvents"));
+                if (overlap.valid() && overlap.Set<bool>(L"bEnable", false)) {
+                    Call(v, overlap);
+                }
+            }
+        }
+    }
+
+    // Physics handles and constraints disabled
+    static const wchar_t* const kPhysicsHandles[] = {
+        L"grabHandle", L"heavyGrab", L"heavyPull", L"heavyPull_loc"
+    };
+    for (const wchar_t* pName : kPhysicsHandles) {
+        const int32_t off = R::FindPropertyOffset(R::ClassOf(actor), pName);
+        if (off >= 0) {
+            if (void* pComp = ReadPtr(actor, off); pComp && R::IsLive(pComp)) {
+                E::SetComponentTickEnabled(pComp, false);
+                E::DeactivateComponent(pComp);
+            }
+        }
+    }
+
+    // Looping Audio Components: stop and deactivate
+    static const wchar_t* const kLoopingAudio[] = {
+        L"A_M_O_G_U_S", L"Audio", L"beep", L"burningAudio", L"eat",
+        L"sndwtmktsts", L"startSprint", L"tinnitus1", L"underwaterLoop",
+        L"windFalingLoop", L"windHeightLoop"
+    };
+    for (const wchar_t* sndName : kLoopingAudio) {
+        const int32_t off = R::FindPropertyOffset(R::ClassOf(actor), sndName);
+        if (off >= 0) {
+            if (void* snd = ReadPtr(actor, off); snd && R::IsLive(snd)) {
+                E::SetComponentTickEnabled(snd, false);
+                E::DeactivateComponent(snd);
+                ParamFrame stop(R::FindDispatchFunctionCached(R::ClassOf(snd), L"Stop"));
+                if (stop.valid()) Call(snd, stop);
+            }
+        }
+    }
+
+    // Both PostProcessComponents destroyed and zeroed: they drive the local camera's colour, exposure and
     // gamma, and alive on a puppet they corrupt whichever screen renders it.
     if (void* pp1 = ReadPtr(actor, P::off::AmainPlayer_PostProcess_overlays_OBSOLETE)) {
         if (E::DestroyComponent(pp1, actor)) {
             UE_LOGI("puppet[MainPlayer]: destroyed PostProcess_overlays_OBSOLETE @ %p", pp1);
         }
+        *reinterpret_cast<void**>(reinterpret_cast<uint8_t*>(actor) + P::off::AmainPlayer_PostProcess_overlays_OBSOLETE) = nullptr;
     }
     if (void* pp2 = ReadPtr(actor, P::off::AmainPlayer_PostProcess_pl)) {
         if (E::DestroyComponent(pp2, actor)) {
             UE_LOGI("puppet[MainPlayer]: destroyed PostProcess_pl @ %p", pp2);
         }
+        *reinterpret_cast<void**>(reinterpret_cast<uint8_t*>(actor) + P::off::AmainPlayer_PostProcess_pl) = nullptr;
     }
-    // The mic UAudioCaptureComponent destroyed: the orphan would otherwise capture the default
+    // The mic UAudioCaptureComponent destroyed and zeroed: the orphan would otherwise capture the default
     // input device into a sink nobody reads.
     if (void* mic = ReadPtr(actor, P::off::AmainPlayer_mic)) {
         if (E::DestroyComponent(mic, actor)) {
             UE_LOGI("puppet[MainPlayer]: destroyed mic UAudioCaptureComponent @ %p", mic);
         }
+        *reinterpret_cast<void**>(reinterpret_cast<uint8_t*>(actor) + P::off::AmainPlayer_mic) = nullptr;
     }
     // The arms and playermodel are hidden without propagation: a propagating hide on any component
     // mesh_playerVisible is attached under cascades to the body, and the puppet rendered invisible.

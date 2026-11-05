@@ -37,7 +37,7 @@ int main() {
     alignas(16) uint8_t stack[512]{};uint8_t params[8]{};void* caller=pages;
     std::memcpy(stack+ue_wrap::profile::off::FFrame_Node,&caller,sizeof(caller));
     void* locals=params;std::memcpy(stack+ue_wrap::profile::off::FFrame_Locals,&locals,sizeof(locals));
-    slot.pre=&Before;PreThunk<0>(nullptr,stack,nullptr);CHECK(calls==4 && !CurrentNativeFunction());
+    slot.resultBytes=0;slot.pre=&Before;PreThunk<0>(nullptr,stack,nullptr);CHECK(calls==4 && !CurrentNativeFunction());
     VirtualFree(pages,0,MEM_RELEASE);
     std::puts("PASS: actual native thunk bool guard page, returns, callback override and exact pre/post callee scope");
 }

@@ -6,7 +6,42 @@ acceptance, qualification and results belong in WORK.md and TESTLOG.md.
 
 ## Priority regressions
 
-- [ ] Fix remote flashlights: every peer currently sees only their own light.
+- [x] PERF3a: preserve balance delivery and pending client native/HUD state across the every-frame same-session SetSession retry.
+- [x] PERF3b: preserve serverbox delivery, native-apply debt and poll cadence across same-session Install retries while continuing watch installation attempts.
+
+- [x] LS1: class-pure switch/root discovery with liveness retained on actual access; permit portable identities for keyless placed base/satellite light actors only. Existing installed local build 2492C08B includes this implementation; rendered acceptance remains in WORK/TESTLOG.
+- [x] PERF1a: bounded32-class InstanceOffset working set with slot/serial invalidation and cached missing fields; preserve correct per-class reflection beyond capacity.
+- [x] PERF1b: remove successful InstanceOffset resolution INFO output, including cache eviction churn; retain missing-field warnings.
+- [x] PERF2: undo only the Desktop clone's unsafe task-pump1.5ms/64 shortcut and existing-ID census skip; canonical task/census logic already preserved its original behavior.
+
+- [x] ENT5a–e: harden Pyramid playback rate, consumed-target safety, component/session binding, active correction and duplicate tail application.
+- [x] ENT6a: reuse permanent dead-watch refusals without spending more name/keyed registration slots; keep equivalent-identity query behavior consistent.
+- [x] ENT6b: remove five impossible inherited-native destruction script watches without altering mannequin interactions or native pacing.
+
+- [x] ENT1: canonical Hoel/shot direct-hit source resolution, owned ignite delivery and harmless client shot births; preserve separate explosion damage route.
+- [x] ENT2: bounded late NPC class/readiness recovery with canonical load paths, latest pose and lifecycle cancellation.
+- [x] ENT3: nearest living ready peer for native Kavotia/Tentacle Ball/Antibreather player reads; broader per-family attacks/camera filters remain below.
+- [x] ENT4: preserve native pyramid montage/timeline join phase including the consumed-wisp tail; keep legacy base IDs unchanged.
+
+- [x] RG2: preserve native recovery camera position and exclude local ragdoll reconfiguration/restart during get-up.
+- [ ] Check missing local ragdoll impact sound; blood is normal and lower damage comparison is against upright falling.
+- [x] RG1: restore local selected-ragdoll collision-hit notifications after physics rebuild so native fall/impact damage can run.
+- [x] ATVH4: stop mirror-only unbraked parked drift while preserving genuine authoritative coasting and current brake/drive/carry state.
+- [x] MN10: reconcile duplicate exact-key walking mannequin identities on clients and preserve canonical held-stream identity through grab/release.
+- [x] ATVH3: preserve settled wheel/body geometry during corrector teleports and avoid time-only parked retry rearming.
+- [x] MN8: accept authoritative mannequin mirror bindings after held/driven adoption without requiring native and host keys to match.
+- [x] MN9: admit native client hover/grab for parked walking mannequins without enabling a second AI or bypassing native frozen/held rules.
+- [x] ATVH2: classify unoccupied/ungrabbed ATV rest from stable authoritative pose despite suspension velocity spikes, preserving real movement and carry.
+- [x] MN6: use negotiated client-native frustum/render observations for mannequin sight without replacing native stalking.
+- [x] MN7: mirror host-native mannequin stand state instead of inferring it from tiny streamed position changes.
+- [x] MN4: mannequin stalking prioritizes the nearest eligible host/client with stable target preference and invalid-target replacement.
+- [x] MN5: redirect the mannequin's native distance gate and MoveTo together, preserving native pacing and the actual navigation proxy.
+- [x] MN3: preserve native mannequin hesitation and movement/damping transitions while incorporating remote sight.
+- [x] MN1: client walker animation stands while held and rebases on release.
+- [x] MN2: client walker animation history uses incarnation-safe references and explicit sample validity.
+- [x] ATVH1: keep stationary grabbed ATV mirrors out of the parked-rig correction limit; preserve parked no-linear-write behavior. Rendered acceptance tracked in WORK.md.
+- [x] Fix remote flashlights: every peer currently sees only their own light (bypassed spring-arm lag, disabled shadow map self-occlusion, drove light_R world transform directly).
+- [x] FL2: make remote puppet light_R location/rotation absolute at spawn and upon authoritative state application, so movement in its attachment chain cannot overwrite the world-space beam pose between RefreshView updates.
 - [ ] Fix the T-pose when players fall into ragdoll on every peer.
 - [ ] Finish held-toy native variant schemas and hook/function ownership beyond
   the validated Dingus/ABPlush capture inputs; preserve bounded native work.
@@ -60,6 +95,7 @@ acceptance, qualification and results belong in WORK.md and TESTLOG.md.
 
 ## Entity implementation
 
+- [x] Pyramid: carry/reconstruct gather progress for mid-sequence late join through optional native montage/timeline state and a consumed-wisp tail.
 - [ ] Grayboar: complete join/audio/time coordination, host targets, turn/pitch,
   helper/delegate retirement, held-item handoffs, weapon/collision damage, one
   corpse/loot, lightning replacement and charged explosion/punch/spin effects.
@@ -116,3 +152,18 @@ acceptance, qualification and results belong in WORK.md and TESTLOG.md.
   beyond vanilla media routes; keep local device/OBS access local.
 - [ ] Audit FireTower 1.0.4 door/ModActor ownership and add any missing shared
   interaction/lifetime routes; retain matching local scenery and collision.
+
+## Local shared white lightning orb fix — 1 November 2026
+
+Named implementation items: HOEL1 host orb birth/pose/lifetime and join state; HOEL2 host beam presentation with client native damage refusal.
+- [x] HOEL1: native superFog_C -> HoelUfo_C and HoelUfo_C -> hoelUfoAttack_C exact output sources, WorldActor allowlist and host lifecycle.
+- [x] HOEL2: bounded endpoint birth bytes; client BeginPlay refusal/readiness; cosmetic particle endpoint and half-second hide; transient beams excluded from join snapshots; PE author cannot pre-enroll an empty beam.
+- [ ] Two-computer rendered encounter, sound/beam parity, host world consequences, event-end/rejoin and general event coverage acceptance remain unperformed.
+The patch does not change personal metaparanoia, protocol2217 or public package2163. It is a local custom build from matching baseline90fd9e6, not a new qualified upstream release.
+
+## Local cadence repair — 2 November 2026
+
+- [x] CAD1: restore pre-Antigravity every-frame subsystem pumping, including client interpolation/application and authoritative clock sampling; keep each subsystem's existing elapsed-time throttles.
+- [x] CAD2: retain and verify the reseed drain's32-candidate cap alongside its elapsed-time budget.
+- [ ] Rendered host/client drone movement, desk cursor/simulation smoothness, accelerated clock and performance comparison remain user acceptance checks.
+No package/protocol bump and no unrelated gameplay repairs are included.

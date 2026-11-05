@@ -44,6 +44,7 @@ __pycache__/
 # Build outputs of vendored deps (regenerable from submodule + build script)
 third_party/*-build/
 reference/*-build/
+src/votv-coop/third_party/Vulkan-Headers/
 
 # ===== Build output =====
 build/

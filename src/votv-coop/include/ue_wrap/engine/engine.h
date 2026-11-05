@@ -140,6 +140,9 @@ bool TryGetComponentWorldRotation(void* component, FRotator& out);
 // moving the root re-bases the child's world transform. Game thread.
 bool SetComponentWorldRotation(void* component, const FRotator& rotation);
 
+// USceneComponent::K2_SetWorldLocationAndRotation (bSweep=false, bTeleport=true). Game thread.
+bool SetComponentWorldLocationAndRotation(void* component, const FVector& location, const FRotator& rotation);
+
 // AActor::SetActorTickEnabled; a remote pawn must not run the local player's per-frame BP
 // EventTick, which re-applies view and post-process to the shared screen. Game thread.
 bool SetActorTickEnabled(void* actor, bool enabled);

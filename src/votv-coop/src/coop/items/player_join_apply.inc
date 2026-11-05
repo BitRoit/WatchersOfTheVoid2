@@ -29,8 +29,18 @@ void OnSaveObjectReady(void* saveSlotObject) {
     if(!current())return;
     if(!itemsApplied){UE_LOGW("player_inventory[client]: inventory restore refused on %p; profile reporting stays closed",saveSlotObject);return;}
     ue_wrap::vitals::Snapshot vitals=profile.vitals;
-    const bool alive=haveProfile && profile.hasVitals && std::isfinite(vitals.health) && std::isfinite(vitals.maxHealth) &&
-        std::isfinite(vitals.food) && std::isfinite(vitals.sleep) && vitals.health>0.f;
+    const auto finiteAll=[&](const ue_wrap::vitals::Snapshot& v){
+        if(!std::isfinite(v.health) || !std::isfinite(v.maxHealth) ||
+           !std::isfinite(v.food) || !std::isfinite(v.sleep) ||
+           !std::isfinite(v.battery) || !std::isfinite(v.coffeePower) ||
+           !std::isfinite(v.gasolinepilled) || !std::isfinite(v.strength) ||
+           !std::isfinite(v.agility)) return false;
+        for(float tol : v.foodTolerance) {
+            if(!std::isfinite(tol)) return false;
+        }
+        return true;
+    };
+    const bool alive=haveProfile && profile.hasVitals && finiteAll(vitals) && vitals.health>0.f;
     bool defaults=alive;
     if(!defaults){defaults=ue_wrap::vitals::ReadDefaults(vitals);if(!current())return;}
     bool vitalsOk=false;

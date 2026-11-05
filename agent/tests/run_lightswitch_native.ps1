@@ -5,7 +5,16 @@ $output=Join-Path $checkout 'build/lightswitch-native-check'
 New-Item -ItemType Directory -Force -Path $output | Out-Null
 Push-Location $checkout
 try {
- if(-not(Get-Command cl -ErrorAction SilentlyContinue)){. (Join-Path $checkout '../_toolchain/env.ps1')}
+ if(-not(Get-Command cl -ErrorAction SilentlyContinue)){
+  $legacy=Join-Path $checkout '../_toolchain/env.ps1'
+  if(Test-Path -LiteralPath $legacy){. $legacy}else{
+   $vsDev='C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\Common7\Tools\VsDevCmd.bat'
+   if(Test-Path -LiteralPath $vsDev){
+    $lines=& cmd.exe /d /s /c ('call "'+$vsDev+'" -arch=x64 -host_arch=x64 >nul && set')
+    foreach($line in $lines){if($line -match '^(.*?)=(.*)$'){Set-Item -Path ('Env:'+$matches[1]) -Value $matches[2]}}
+   }
+  }
+ }
  function Compile-Lights($exe,$header=''){
   $extra=@();if($header){$extra+="/FI$header"}
   & cl /nologo /std:c++20 /EHsc /Gy /utf-8 /I src/votv-coop/include @extra "/Fo$exe.obj" "/Fe$exe" agent/tests/lightswitch_native_test.cpp /link /OPT:REF
@@ -19,8 +28,9 @@ try {
  if($FaultControls){
   $source=[IO.File]::ReadAllText((Join-Path $checkout 'src/votv-coop/src/ue_wrap/devices/lightswitch.cpp')).Replace("`r`n","`n")
   $controls=@(
-   @{Name='root-reload';Before='if (RootLayoutCurrent()) return true;';After='if (g_resolved.load()) return true;'},
-   @{Name='switch-reload';Before='if (SwitchLayoutCurrent()) return true;';After='if (g_swResolved.load()) return true;'},
+   @{Name='class-pure';Before='if (!obj) return false;';After='if (!obj || !R::IsLive(obj)) return false;'},
+   @{Name='root-reload';Before='if (RootLayoutCached()) return true;';After='if (g_resolved.load()) return true;'},
+   @{Name='switch-reload';Before='if (SwitchLayoutCached()) return true;';After='if (g_swResolved.load()) return true;'},
    @{Name='root-fields';Before='const int32_t keyOff=R::FindPropertyOffset(rootCls,L"Key");';After='const int32_t keyOff=(std::max)(0,R::FindPropertyOffset(rootCls,L"Key"));'},
    @{Name='switch-fields';Before='if(keyOff<0 || objectsOff<0 ||';After='if(objectsOff<0 ||'},
    @{Name='root-mask';Before='[g_isActiveOff] & g_isActiveMask';After='[g_isActiveOff] & 0xFF'},

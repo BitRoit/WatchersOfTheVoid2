@@ -74,11 +74,41 @@ bool StartBodySim(void* comp) {
     // a late swap can also arrive here after the component's evaluation tick.
     const int physicsOffset = R::FindPropertyOffset(cls, L"PhysicsAssetOverride");
     void* physics = nullptr;
-    if (physicsOffset < 0) return false;
-    std::memcpy(&physics, static_cast<uint8_t*>(comp) + physicsOffset, sizeof(physics));
+    if (physicsOffset >= 0) {
+        std::memcpy(&physics, static_cast<uint8_t*>(comp) + physicsOffset, sizeof(physics));
+    }
+    if (!physics || !R::IsLive(physics)) {
+        void* skelMesh = puppet::GetComponentSkeletalMeshAsset(comp);
+        if (skelMesh && R::IsLive(skelMesh)) {
+            const int skelPhysOff = R::FindPropertyOffset(R::ClassOf(skelMesh), L"PhysicsAsset");
+            if (skelPhysOff >= 0) {
+                std::memcpy(&physics, static_cast<uint8_t*>(skelMesh) + skelPhysOff, sizeof(physics));
+            }
+        }
+    }
     CachedObjRef physicsRef; physicsRef.Set(physics);
     if (!physicsRef.Get()) return false;
     if (!RebuildPlayerRagdollPhysics(comp, physics) || !ref.Get() || !physicsRef.Get()) return false;
+
+    // Apply linear and angular damping so the ragdoll has natural ground drag and friction
+    // instead of sliding indefinitely across terrain.
+    ParamFrame linDamp(R::FindDispatchFunctionCached(cls, L"SetLinearDamping"));
+    if (linDamp.valid()) {
+        if (!linDamp.Set<float>(L"InDamping", 0.8f) && linDamp.FrameSize() >= (int)sizeof(float)) {
+            float v = 0.8f;
+            std::memcpy(linDamp.data(), &v, sizeof(v));
+        }
+        Call(comp, linDamp);
+    }
+    ParamFrame angDamp(R::FindDispatchFunctionCached(cls, L"SetAngularDamping"));
+    if (angDamp.valid()) {
+        if (!angDamp.Set<float>(L"InDamping", 1.5f) && angDamp.FrameSize() >= (int)sizeof(float)) {
+            float v = 1.5f;
+            std::memcpy(angDamp.data(), &v, sizeof(v));
+        }
+        Call(comp, angDamp);
+    }
+
     ParamFrame collision(R::FindDispatchFunctionCached(cls, L"SetCollisionEnabled"));
     if (!collision.Set<uint8_t>(L"NewType", 3) || !Call(comp, collision) || !ref.Get()) return false;
     ParamFrame bodies(R::FindDispatchFunctionCached(cls, L"SetAllBodiesSimulatePhysics"));
@@ -410,12 +440,10 @@ void OnNativeRagdollArmAttached(void* component, void* source, void*) {
     if (!Call(component, attached) || !attached.GetRaw(L"ReturnValue", &parent, sizeof(parent)) ||
         !parent || parent != LocalComponent(player, L"crouchRoot")) return;
     CachedObjRef arm, controller; arm.Set(component); controller.Set(GetController(player));
-    FRotator view{}; FVector position{};
+    FRotator view{};
     ParamFrame rotation(R::FindDispatchFunctionCached(R::ClassOf(component), L"K2_GetComponentRotation"));
-    ParamFrame location(R::FindDispatchFunctionCached(R::ClassOf(component), L"K2_GetComponentLocation"));
     if (!arm.Get() || !controller.Get() || !Call(component, rotation) ||
-        !rotation.GetRaw(L"ReturnValue", &view, sizeof(view)) || !Call(component, location) ||
-        !location.GetRaw(L"ReturnValue", &position, sizeof(position)) || !FiniteVelocity(position) || !std::isfinite(view.Yaw) ||
+        !rotation.GetRaw(L"ReturnValue", &view, sizeof(view)) || !std::isfinite(view.Yaw) ||
         !std::isfinite(view.Pitch) || !std::isfinite(view.Roll) || !g_localRagdollPlayer.Get()) return;
     // Native wakeup captures this arm's relative transform and blends it to
     // upright, then clears its relative rotation at the end of the timeline.
@@ -425,8 +453,35 @@ void OnNativeRagdollArmAttached(void* component, void* source, void*) {
     SetControlRotation(controller.Get(), {0.f, view.Yaw, 0.f});
     if (!g_localRagdollPlayer.Get() || !arm.Get() || !controller.Get() ||
         !SetActorRotation(player, {0.f, view.Yaw, 0.f}) || !arm.Get()) return;
-    ParamFrame restore(R::FindDispatchFunctionCached(R::ClassOf(component), L"K2_SetWorldLocationAndRotation"));
-    if (!restore.Set<FVector>(L"NewLocation", position) || !restore.Set<FRotator>(L"NewRotation", view) ||
+    // Reparenting with KeepWorld inherits whatever world displacement the ragdoll
+    // head had when get-up started. If PhysX anchor separation or aerial launch flung
+    // the arm beyond a sane get-up radius (e.g. 1000cm+ spikes), clamp it back so wakeup
+    // does not interpolate from outer space.
+    void* crouchRoot = LocalComponent(player, L"crouchRoot");
+    const int locOff = R::FindPropertyOffset(R::ClassOf(component), L"RelativeLocation");
+    if (parent == crouchRoot && crouchRoot != nullptr && locOff >= 0) {
+        float eyeHeight = 70.0f;
+        const int eyeOff = R::FindPropertyOffset(R::ClassOf(player), L"defaultEyeHeight");
+        if (eyeOff >= 0) {
+            std::memcpy(&eyeHeight, static_cast<const uint8_t*>(player) + eyeOff, sizeof(eyeHeight));
+            if (eyeHeight <= 0.f || !std::isfinite(eyeHeight)) eyeHeight = 70.0f;
+        }
+        FVector curRel{};
+        std::memcpy(&curRel, static_cast<uint8_t*>(component) + locOff, sizeof(curRel));
+        if (std::abs(curRel.Z - eyeHeight) > 150.f || std::abs(curRel.X) > 180.f || std::abs(curRel.Y) > 180.f) {
+            ParamFrame relLoc(R::FindDispatchFunctionCached(R::ClassOf(component), L"K2_SetRelativeLocation"));
+            if (relLoc.valid() && relLoc.Set<FVector>(L"NewLocation", {0.f, 0.f, eyeHeight}) &&
+                relLoc.Set<bool>(L"bSweep", false) && relLoc.Set<bool>(L"bTeleport", true)) {
+                Call(component, relLoc);
+                UE_LOGI("ragdoll_transition: clamped separated get-up arm offset (rel=(%.1f,%.1f,%.1f) -> {0,0,%.1f})",
+                        curRel.X, curRel.Y, curRel.Z, eyeHeight);
+            }
+        }
+    }
+    // Location belongs to native reparenting/get-up. Writing the captured world
+    // position back here restores an obsolete offset after the parent moves.
+    ParamFrame restore(R::FindDispatchFunctionCached(R::ClassOf(component), L"K2_SetWorldRotation"));
+    if (!restore.Set<FRotator>(L"NewRotation", view) ||
         !restore.Set<bool>(L"bSweep", false) || !restore.Set<bool>(L"bTeleport", true) || !Call(component, restore)) return;
     g_entryViewPending = false;
     UE_LOGI("ragdoll_transition: native recovery owns current view yaw %.2f", view.Yaw);
@@ -523,6 +578,50 @@ void* GetLocalRagdollBodyMesh(void* mainPlayer) {
 
 bool RefreshLocalRagdollModel(void* mainPlayer) {
     WatchLocalRagdoll(mainPlayer);
+    const auto flag=[&](const wchar_t* name,bool fallback){
+        int32_t off=-1;uint8_t mask=0;
+        return R::FindBoolProperty(R::ClassOf(mainPlayer),name,off,mask)&&off>=0&&mask
+            ? (static_cast<uint8_t*>(mainPlayer)[off]&mask)!=0 : fallback;
+    };
+    const bool inRagdoll=flag(L"isRagdoll",true);
+
+    // Steady-state watchdog: ONLY once standing on foot and wakingup timeline
+    // has finished/aborted (!inRagdoll && !isWakingUp), verify lag relative
+    // offset has settled at {0, 0, eyeHeight} relative to crouchRoot.
+    // Read lag's RelativeLocation via R::FindPropertyOffset before calling
+    // GetAttachParent so normal on-foot play has zero ProcessEvent (Call) overhead.
+    if (!inRagdoll && !flag(L"isWakingUp", false)) {
+        void* lag = LocalComponent(mainPlayer, L"lag");
+        if (lag) {
+            const int locOff = R::FindPropertyOffset(R::ClassOf(lag), L"RelativeLocation");
+            if (locOff >= 0) {
+                float eyeHeight = 70.0f;
+                const int eyeOff = R::FindPropertyOffset(R::ClassOf(mainPlayer), L"defaultEyeHeight");
+                if (eyeOff >= 0) {
+                    std::memcpy(&eyeHeight, static_cast<const uint8_t*>(mainPlayer) + eyeOff, sizeof(eyeHeight));
+                    if (eyeHeight <= 0.f || !std::isfinite(eyeHeight)) eyeHeight = 70.0f;
+                }
+                FVector curRel{};
+                std::memcpy(&curRel, static_cast<uint8_t*>(lag) + locOff, sizeof(curRel));
+                if (std::abs(curRel.Z - eyeHeight) > 15.f || std::abs(curRel.X) > 10.f || std::abs(curRel.Y) > 10.f) {
+                    void* crouchRoot = LocalComponent(mainPlayer, L"crouchRoot");
+                    void* parent = nullptr;
+                    ParamFrame getParent(R::FindDispatchFunctionCached(R::ClassOf(lag), L"GetAttachParent"));
+                    if (crouchRoot && getParent.valid() && Call(lag, getParent) &&
+                        getParent.GetRaw(L"ReturnValue", &parent, sizeof(parent)) && parent == crouchRoot) {
+                        ParamFrame setRelLoc(R::FindDispatchFunctionCached(R::ClassOf(lag), L"K2_SetRelativeLocation"));
+                        if (setRelLoc.valid() && setRelLoc.Set<FVector>(L"NewLocation", {0.f, 0.f, eyeHeight}) &&
+                            setRelLoc.Set<bool>(L"bSweep", false) && setRelLoc.Set<bool>(L"bTeleport", true)) {
+                            Call(lag, setRelLoc);
+                            UE_LOGI("ragdoll_view: settled stranded arm offset (rel=(%.1f,%.1f,%.1f) -> {0,0,%.1f})",
+                                    curRel.X, curRel.Y, curRel.Z, eyeHeight);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     void* target = GetLocalRagdollBodyMesh(mainPlayer);
     void* source = puppet::GetMeshPlayerVisibleComponent(mainPlayer);
     void* asset = puppet::GetComponentSkeletalMeshAsset(source);
@@ -530,6 +629,12 @@ bool RefreshLocalRagdollModel(void* mainPlayer) {
         g_configuredRagdoll.Reset(); g_selectedRagdoll.Reset(); g_ragdollView.Reset();
         g_entryScript.Reset(); g_entryViewPending = false; g_ragdollStarted = false; g_recoveryAligned = false;
         CancelRagdollVelocity(); return false;
+    }
+    if(!inRagdoll||flag(L"isWakingUp",false)){
+        // Native recovery can leave its actor alive while switching its camera
+        // and simulation off. Never rebuild/restart that retiring body's rig.
+        g_entryViewPending=false;CancelRagdollVelocity();
+        return inRagdoll&&g_ragdollStarted&&g_configuredRagdoll.Get()==target&&g_selectedRagdoll.Get()==asset;
     }
     if (g_configuredRagdoll.Get() == target && g_selectedRagdoll.Get() == asset) {
         if (!g_ragdollStarted) {

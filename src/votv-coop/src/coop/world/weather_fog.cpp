@@ -224,15 +224,31 @@ void ApplyFromHost(void* cycle, const coop::net::WeatherStatePayload& payload) {
                 payload.fogAlpha, payload.fogStrength, payload.finalFogDensity);
     }
 
-    // Super fog: clear-only (destroy a stray when the host has none). The spawn is deferred: the
-    // super-fog actor owns a UFO encounter, and its spawn was not reliably reproducible in the
-    // probe. A bounded loop, since the by-class find returns one.
+    // Super fog: mirror the host's super-fog presence. When the host has super-fog active,
+    // ensure the client has exactly one local superFog_C instance to run the dense volumetric fog
+    // and metaparanoia effects (the client-side spawnUfo call is cancelled in spawn_authority.cpp
+    // so the white orb is not duplicated). When the host has none, destroy any client copy.
     if (!hostSuperActive) {
         for (int k = 0; k < 8; ++k) {
             void* sf = R::FindObjectByClass(P::name::SuperFogClass);
             if (!sf || !R::IsLive(sf)) break;
             E::DestroyActor(sf);
             UE_LOGI("weather_fog: host CLEAR -> destroyed stray client super-fog actor");
+        }
+    } else {
+        void* sf = R::FindObjectByClass(P::name::SuperFogClass);
+        if (!sf || !R::IsLive(sf)) {
+            void* sfClass = R::FindClass(P::name::SuperFogClass);
+            if (sfClass) {
+                void* spawned = E::SpawnActor(sfClass, ue_wrap::FVector{0.f, 0.f, 0.f});
+                if (spawned && R::IsLive(spawned)) {
+                    UE_LOGI("weather_fog: host SUPER FOG -> mirror-spawned client super-fog actor %p", spawned);
+                } else {
+                    UE_LOGW("weather_fog: host SUPER FOG -> SpawnActor(superFog_C) failed");
+                }
+            } else {
+                UE_LOGW("weather_fog: host SUPER FOG -> class 'superFog_C' not found");
+            }
         }
     }
 
@@ -296,6 +312,13 @@ bool HostFogStateChanged(void* cycle) {
 }
 
 void OnDisconnect() {
+    if (g_isClient.load(std::memory_order_acquire)) {
+        for (int k = 0; k < 8; ++k) {
+            void* sf = R::FindObjectByClass(P::name::SuperFogClass);
+            if (!sf || !R::IsLive(sf)) break;
+            E::DestroyActor(sf);
+        }
+    }
     g_spawnFogEchoSuppress.store(false, std::memory_order_release);
     g_lastHostFogBits = 0xFF;
     g_lastDetectMs    = 0;

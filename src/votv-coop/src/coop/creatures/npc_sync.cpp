@@ -27,6 +27,9 @@
 #include "ue_wrap/core/log.h"
 #include "ue_wrap/core/reflection.h"
 #include "ue_wrap/core/sdk_profile.h"
+#include "ue_wrap/engine/world_identity.h"
+#include <shared_mutex>
+#include <unordered_map>
 
 #include <atomic>
 #include <cmath>
@@ -86,11 +89,35 @@ thread_local PendingNpcSpawn t_pendingNpc{coop::element::kInvalidId, nullptr};
 // ue_wrap::reflection::IsDescendantOfAny so the SuperStruct offset stays in the wrapper; one
 // chain walk checking every base per hop.
 bool IsClassOrDerivedFromAnyAllowlisted(void* cls) {
+    if (!cls) return false;
     if (R::IsDescendantOfAny(cls, g_npcAllowlist, P::name::kNpcAllowlistSize)) return true;
-    // Event classes load on demand. A cached pointer may still be null on the
-    // very spawn that loads it; match its actual ancestry without waiting for
-    // the periodic resolver (or mutating the shared cache on a worker thread).
-    return coop::npc_class_policy::MatchesAncestryName(cls);
+
+    // Fast memoization cache: in a 120,000 UObjectArray walk, non-NPC classes are inspected
+    // thousands of times. MatchesAncestryName does an unmemoized string-comparing chain walk,
+    // which costs ~1.1 seconds when evaluated per-object.
+    static std::unordered_map<void*, bool> s_cache;
+    static std::shared_mutex s_cacheMutex;
+    static uint64_t s_cacheGen = 0;
+
+    const auto curGen = ue_wrap::world_identity::Generation();
+    {
+        std::shared_lock<std::shared_mutex> rlk(s_cacheMutex);
+        if (s_cacheGen == curGen) {
+            auto it = s_cache.find(cls);
+            if (it != s_cache.end()) return it->second;
+        }
+    }
+
+    const bool match = coop::npc_class_policy::MatchesAncestryName(cls);
+    {
+        std::unique_lock<std::shared_mutex> wlk(s_cacheMutex);
+        if (s_cacheGen != curGen) {
+            s_cache.clear();
+            s_cacheGen = curGen;
+        }
+        s_cache[cls] = match;
+    }
+    return match;
 }
 
 }  // namespace; the callbacks below are named, registered by npc_sync_install.cpp

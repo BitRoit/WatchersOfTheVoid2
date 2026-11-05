@@ -22,9 +22,10 @@ void *rootClass,*switchClass,*runFunction,*setFunction,*useFunction;
 void *lampClass,*ambientClass,*lampFunction,*ambientFunction,*soundFunction,*attenuationValue;
 void* links[2]{};
 uint32_t world=1;
+uint64_t rootListing=1,switchListing=1;
 bool rootLoaded=true,switchLoaded=true,runLoaded=true,useLoaded=true;
 std::wstring missingProperty,missingBool,missingParam;
-int calls=0,lastIndex=-1;
+int calls=0,lastIndex=-1,findClassCalls=0,findFunctionCalls=0;
 bool lastBreaker=false,callOk=true;
 bool soundLoaded=true,hookOk=true,attenuationOk=true,locationOk=true,emitReplay=false,nestedUse=false;
 int spawns=0,plays=0,installs=0,soundFrame=16,soundOffset=0,volumeOffset=8,pitchOffset=12;
@@ -48,11 +49,11 @@ void Reset(){
  for(int i:{18,21,23,31})objects[i].world=reinterpret_cast<void*>(uintptr_t(world));
  links[0]=&objects[8];links[1]=&objects[16];objects[9].links={reinterpret_cast<uint8_t*>(links),2,2};
  rootLoaded=switchLoaded=runLoaded=useLoaded=true;missingProperty=missingBool=missingParam=L"";
- calls=0;lastIndex=-1;lastBreaker=false;callOk=true;
+ rootListing=switchListing=1;calls=0;lastIndex=-1;findClassCalls=findFunctionCalls=0;lastBreaker=false;callOk=true;
  soundLoaded=hookOk=attenuationOk=locationOk=true;emitReplay=nestedUse=false;
  spawns=plays=installs=0;soundFrame=16;soundOffset=0;volumeOffset=8;pitchOffset=12;
  position={10,20,30};playedVolume=playedPitch=0;playedCue=playedAttenuation=nullptr;soundHook=nullptr;callbackFunction=nullptr;sound={&objects[25],.75f,1.2f};
- L::g_resolved=false;L::g_swResolved=false;L::g_clickHookReady=false;L::g_clickAttenuation={};L::g_soundFunction={};
+ L::g_resolved=false;L::g_swResolved=false;L::g_rootClassListingId=L::g_switchClassListingId=0;L::g_clickHookReady=false;L::g_clickAttenuation={};L::g_soundFunction={};
  L::g_replayedSwitch=nullptr;L::g_replayIdentity=nullptr;L::g_buildingAttenuation=false;
 }
 }
@@ -66,6 +67,7 @@ void* ObjectAt(int32_t i){return i>=0 && i<32?&test::objects[i]:nullptr;}
 void* ClassOf(void* p){if(p==test::classCallbackTarget)test::Callback(test::onClass);return p?static_cast<test::Obj*>(p)->cls:nullptr;}
 bool IsDescendantOfAny(void* cls,void* const* bases,size_t count,int){for(size_t i=0;i<count;++i)if(cls==bases[i])return true;return false;}
 void* FindClass(const wchar_t* n){
+ ++test::findClassCalls;
  if(!_wcsicmp(n,L"trigger_lightRoot_C"))return test::rootLoaded?test::rootClass:nullptr;
  if(!_wcsicmp(n,L"lightswitch_C"))return test::switchLoaded?test::switchClass:nullptr;
  if(!_wcsicmp(n,L"ceilingLamp_C"))return test::lampClass;
@@ -73,6 +75,7 @@ void* FindClass(const wchar_t* n){
  return nullptr;
 }
 void* FindFunction(void* cls,const wchar_t* n){
+ ++test::findFunctionCalls;
  if(cls==test::rootClass){if(!_wcsicmp(n,L"runTrigger"))return test::runLoaded?test::runFunction:nullptr;if(!_wcsicmp(n,L"SetActive"))return test::setFunction;}
  if(cls==test::switchClass && !_wcsicmp(n,L"use"))return test::useLoaded?test::useFunction:nullptr;
  return nullptr;
@@ -124,7 +127,14 @@ bool CallFunction(void* actor,void* fn,void* frame){
 }
 }
 namespace ue_wrap::facts {Resolved Resolve(const Function& row){test::Callback(test::onSound);return test::soundLoaded?Resolved(test::soundFunction,&row):Resolved{};}}
-namespace ue_wrap::object_index {void* ClassByName(const wchar_t* n){return reflection::FindClass(n);}}
+namespace ue_wrap::object_index {
+void* ClassByName(const wchar_t* n){return reflection::FindClass(n);}
+uint64_t ClassListingId(void* cls){
+ if(cls==test::rootClass)return test::rootListing;
+ if(cls==test::switchClass)return test::switchListing;
+ return 0;
+}
+}
 namespace ue_wrap::log {void Write(Level,const char*,...) {}}
 namespace ue_wrap::world_identity {
 uint32_t Generation(){return test::world;}
@@ -141,18 +151,35 @@ bool InstallPreHook(const facts::Resolved&,PreNativeCallback cb,bool){++test::in
 void* CurrentNativeFunction(){return test::callbackFunction;}
 }
 namespace test {
+void ResolverCache(){
+ Reset();CHECK(L::EnsureResolved()&&L::EnsureSwitchResolved());
+ const int beforeClass=findClassCalls,beforeFunction=findFunctionCalls;
+ for(int i=0;i<1000;++i)CHECK(L::EnsureResolved()&&L::EnsureSwitchResolved());
+ CHECK(findClassCalls==beforeClass&&findFunctionCalls==beforeFunction);
+}
+void ClassPureDiscovery(){
+ Reset();CHECK(L::EnsureResolved()&&L::EnsureSwitchResolved());
+ objects[8].live=objects[9].live=false;
+ // The hub classifies from one representative; its pending retirement cannot
+ // hide every other instance of this class. Accessors still refuse that object.
+ CHECK(L::IsLightRoot(&objects[8])&&L::IsLightSwitch(&objects[9]));
+ bool value=false;CHECK(!L::TryReadActive(&objects[8],value));
+ CHECK(!L::TryReadSwitchA(&objects[9],value));
+ CHECK(!L::CallUse(&objects[9])&&!L::ApplyGroupState(&objects[8],true)&&!calls);
+ CHECK(L::GetKeyString(&objects[8]).empty()&&L::GetSwitchKeyString(&objects[9]).empty());
+}
 void RootReload(){
  Reset();runLoaded=false;CHECK(!L::EnsureResolved());runLoaded=true;CHECK(L::EnsureResolved());
  CHECK(L::g_runTrigger.Get()==runFunction);++objects[3].serial;CHECK(!L::RootLayoutCurrent());CHECK(L::EnsureResolved());
- runFunction=&objects[12];CHECK(!L::RootLayoutCurrent());CHECK(L::EnsureResolved() && L::g_runTrigger.Get()==runFunction);
- rootClass=&objects[11];CHECK(!L::RootLayoutCurrent());CHECK(L::EnsureResolved() && L::g_rootClass.Get()==rootClass);
+ runFunction=&objects[12];++rootListing;CHECK(!L::RootLayoutCurrent());CHECK(L::EnsureResolved() && L::g_runTrigger.Get()==runFunction);
+ rootClass=&objects[11];++rootListing;CHECK(!L::RootLayoutCurrent());CHECK(L::EnsureResolved() && L::g_rootClass.Get()==rootClass);
  bool value=true;CHECK(!L::TryReadActive(&objects[8],value) && value);objects[8].cls=rootClass;CHECK(L::TryReadActive(&objects[8],value) && !value);
 }
 void SwitchReload(){
  Reset();useLoaded=false;CHECK(!L::EnsureSwitchResolved());useLoaded=true;CHECK(L::EnsureSwitchResolved());
  ++objects[5].serial;CHECK(!L::SwitchLayoutCurrent());CHECK(L::EnsureSwitchResolved());
- useFunction=&objects[14];CHECK(!L::SwitchLayoutCurrent());CHECK(L::EnsureSwitchResolved() && L::g_use.Get()==useFunction);
- switchClass=&objects[13];CHECK(!L::SwitchLayoutCurrent());CHECK(L::EnsureSwitchResolved() && L::g_switchClass.Get()==switchClass);
+ useFunction=&objects[14];++switchListing;CHECK(!L::SwitchLayoutCurrent());CHECK(L::EnsureSwitchResolved() && L::g_use.Get()==useFunction);
+ switchClass=&objects[13];++switchListing;CHECK(!L::SwitchLayoutCurrent());CHECK(L::EnsureSwitchResolved() && L::g_switchClass.Get()==switchClass);
  bool value=true;CHECK(!L::TryReadSwitchA(&objects[9],value) && value);objects[9].cls=switchClass;CHECK(L::TryReadSwitchA(&objects[9],value) && !value);
 }
 void RootFields(){
@@ -207,7 +234,7 @@ void UseLifetime(){
 }
 int main(int argc,char** argv){
  using namespace test;struct Case{const char* name;void(*run)();};
- const Case cases[]={{"root-reload",RootReload},{"switch-reload",SwitchReload},{"root-fields",RootFields},{"switch-fields",SwitchFields},
+ const Case cases[]={{"resolver-cache",ResolverCache},{"class-pure",ClassPureDiscovery},{"root-reload",RootReload},{"switch-reload",SwitchReload},{"root-fields",RootFields},{"switch-fields",SwitchFields},
   {"root-mask",RootMask},{"switch-mask",SwitchMask},{"breaker-mask",BreakerMask},{"links",Links},{"group-calls",GroupCalls},{"use-lifetime",UseLifetime}};
  bool ran=false;for(const auto& item:cases)if(argc<2 || std::string(argv[1])==item.name){item.run();std::printf("PASS lightswitch native %s\n",item.name);ran=true;}CHECK(ran);return 0;
 }

@@ -46,6 +46,16 @@ bool TryReadOpen(void* g, bool& open);
 // and runs on. Must run on the game thread. False on null or an unresolved UFunction.
 bool ApplyOpen(void* g, bool open);
 
+// Immediately snaps the garage door to `open` without the 8-second animated swing (the corrected
+// settime behavior). Updates Open and mov, calls native set(), positions the move timeline to 6.0s (open)
+// or 0.0s (closed), plays the looping montage section (openLoop or closeLoop), stops loop audio, and
+// updates NavModifier.
+bool SnapOpen(void* g, bool open);
+
+// Registers the script_gate watch on garage_C::settime so that save loads (loadTriggerData) and join
+// snapshots execute the clean SnapOpen rather than the native buggy settime. Game thread.
+bool Install();
+
 // Whether the garage is mid-swing, its `mov`: its runTrigger ignores a call then. False if the read
 // could not be made (null, or the field did not resolve). Game thread.
 bool TryReadMoving(void* g, bool& moving);

@@ -56,9 +56,9 @@ bool PropertyOffsetAndClass(void* owningStruct, const wchar_t* propName, int32_t
 // A property's offset on the class of the instance it is asked with, for a wrapper that holds an
 // instance rather than a class by name: the instance's class is loaded by construction, so nothing
 // waits on a class to load. Kept per class object, held by its slot and serial as a weak pointer
-// is, and asked again when an instance of another class object comes (a subclass, a class a new
-// world reloaded, or a new class at a dead one's address). -1 when that class does not declare it,
-// said once per class object. Game thread.
+// is. A bounded working set keeps mixed-class census reads from reflecting and logging
+// the same layouts on every alternating instance. Replaced/recycled classes are resolved
+// afresh. Missing properties are cached too. Game thread.
 class InstanceOffset {
 public:
     explicit constexpr InstanceOffset(const wchar_t* propName) : prop_(propName) {}
@@ -66,10 +66,16 @@ public:
 
 private:
     const wchar_t* prop_;
-    void* cls_ = nullptr;
-    int32_t clsIdx_ = -1;
-    int32_t clsSerial_ = 0;
-    int32_t off_ = -1;
+    struct Entry {
+        void* cls = nullptr;
+        int32_t index = -1;
+        int32_t serial = 0;
+        int32_t offset = -1;
+    };
+    static constexpr uint32_t kCacheSize = 32;
+    Entry entries_[kCacheSize]{};
+    uint32_t last_ = 0;
+    uint32_t next_ = 0;
 };
 
 // A parameter's offset in the frame of the function it is asked with (FindParamOffset), for a watch handed its

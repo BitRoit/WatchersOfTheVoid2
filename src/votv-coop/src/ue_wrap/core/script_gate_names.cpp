@@ -37,8 +37,10 @@ bool WatchNameScoped(const wchar_t* className, const wchar_t* name, int tag, Pre
     for (int i = 0; i < kSlots; ++i) {
         Entry& e = g_nameTable[i];
         if (e.key.load(std::memory_order_relaxed) != 0 && e.name && e.tag == tag && e.pre == pre &&
-            e.post == post && std::wcscmp(e.name, name) == 0 && SameLiteral(e.className, className) &&
-            !e.dead.load(std::memory_order_relaxed)) {
+            e.post == post && std::wcscmp(e.name, name) == 0 && SameLiteral(e.className, className)) {
+            // A settled refusal belongs to this registration too. Repeated
+            // Install calls must not allocate another doomed placeholder.
+            if (e.dead.load(std::memory_order_relaxed)) return false;
             if (!e.enabled.exchange(true, std::memory_order_release)) g_nameWatches.fetch_add(1, std::memory_order_release);
             return true;
         }
@@ -70,7 +72,7 @@ bool ScopedWatchLive(const wchar_t* className, const wchar_t* name, int tag) {
     for (int i = 0; i < kSlots; ++i) {
         const Entry& e = g_nameTable[i];
         if (e.key.load(std::memory_order_acquire) == 0) continue;
-        if (e.name != name || e.className != className || e.tag != tag) continue;
+        if (!SameLiteral(e.name,name) || !SameLiteral(e.className,className) || e.tag != tag) continue;
         if (e.enabled.load(std::memory_order_acquire) && e.resolved.load(std::memory_order_acquire))
             return true;
     }
@@ -83,7 +85,7 @@ bool ScopedWatchSettled(const wchar_t* className, const wchar_t* name, int tag) 
     for (int i = 0; i < kSlots; ++i) {
         const Entry& e = g_nameTable[i];
         if (e.key.load(std::memory_order_acquire) == 0) continue;
-        if (e.name != name || e.className != className || e.tag != tag) continue;
+        if (!SameLiteral(e.name,name) || !SameLiteral(e.className,className) || e.tag != tag) continue;
         if (e.dead.load(std::memory_order_acquire)) return true;
         if (e.enabled.load(std::memory_order_acquire) && e.resolved.load(std::memory_order_acquire))
             return true;

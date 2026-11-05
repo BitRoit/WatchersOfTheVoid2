@@ -1,5 +1,555 @@
 # WORK — current state and open work
 
+## Remote flashlight absolute transform & view optimization (Revision 5) — 4 November 2026
+
+- [x] FL3: cached `lag_fl` and `light_R` property offsets (`viewLayoutClass_`, `lagFlOffset_`, `lightROffset_`) in `RemotePlayer`, eliminating hot-path reflection lookups on every presentation tick. Hardened `RefreshView` re-entrancy order: sample `TryGetActorLocation` first and re-verify `current() && viewLayoutClass_.Is(viewClass)` and `R::IsLive(lightComp)` before setting transform.
+- [x] Rebuilt Release `main.dll` (`231F2A2B412A8DBDC34D9CC2144029F60FD0B8B8368F176DACF984AFB3E11101`), verified ABI drill passes (0 UE4SS imports).
+- [x] Verified full regression suites: `run_flashlight_absolute.ps1`, `run_seat_presentation.ps1 -FaultControls` (25 fault controls passed), `run_flashlight_native.ps1`, `run_2145.ps1 -FaultControls`, `run_lightswitch_native.ps1 -FaultControls`, `run_light_identity.ps1 -FaultControls`.
+- [x] Deployed `main.dll` into Thunderstore profiles `Default` and `Client1` after verifying games were closed; previous DLLs backed up as `main.dll.before-flashlight-hardened-20261105`.
+- [x] Packaged friend update ZIP `outputs/WatchersOfTheVoid-0.9.2163-performance-lighting-20261104-r5.zip` (SHA256 `851ECED1C1835AE829323EFB3E30C40A8A598DD0AA138EFB0BE83145067A433A`), verified 9-member archive and clean extraction.
+- [ ] Two-player rendered gameplay acceptance: verify remote flashlight tracks smoothly without flickering/strobing during movement.
+
+
+## Remote flashlight attachment correction — 4 November 2026
+
+- [x] FL2: added the game-thread `USceneComponent::SetAbsolute` wrapper, with live-object,
+  resolved-function, framed-parameter and dispatch failure guards. It sets absolute location and
+  rotation but preserves the component's authored scale.
+- [x] The remote puppet applies that rule to `light_R` after spawn, and the existing authoritative
+  flashlight application path reasserts it if the native light component is replaced. The state,
+  intensity, cone, visibility and shadow behavior remain otherwise unchanged.
+- [x] Direct production-wrapper fixture passes valid dispatch, missing class/function, dead target,
+  all three missing parameter names and dispatch refusal. Existing flashlight state/join/click and
+  seat-presentation regressions, a full Release build and loader ABI checks pass.
+- [x] Candidate `5BA4C30D4D751411C1C6D1B1C333EDFF62B4FDBCA791D7998961DCEE052F6565`
+  (28,552,704 bytes; product `0.9.0n b2217`) was installed into Default and Client1 after a no-game
+  process check. Each retains `main.dll.before-flashlight-absolute-20261104` with the former
+  `62E7464F...` build and `main.dll.before-flashlight-absolute-r4-20261104` with the former
+  `9F5AA54B...` build.
+- [x] Friend ZIP revision 4 is
+  `outputs/WatchersOfTheVoid-0.9.2163-performance-lighting-20261104-r4.zip`, SHA256
+  `0317AD5A094BF9D91AA0CD04E08101550920B69528B91FB0FE40EE7204537B14`. Its nine files contain
+  no saves/settings/logs; a disposable profile verified install, idempotent reinstall, restore to
+  revision 3, wrong-version refusal, locked-file refusal and checksum refusal.
+- [ ] Two-player rendering still needs confirmation: have the other player turn on a flashlight,
+  walk/turn/run past them, and confirm the beam stays attached to their aim without step-by-step
+  flashes or snapping into their body. This is the acceptance test, not a claim that the original
+  report has already been resolved.
+
+## PERF3 delivery and laptop restart boundary — 4 November 2026
+
+Owner confirms the affected laptop shows a startup logo and requires sign-in/
+game relaunch. The separate host desktop remained up/responding; its Windows
+events and collector validation do not diagnose the laptop. Read-only laptop
+collector provided as outputs/VotV-laptop-restart-diagnostics-20261104.zip.
+Only a desktop validation report exists here; actual laptop events/dump evidence
+is still required. Do not request another crash reproduction. No driver, power,
+BIOS, security or laptop configuration changes were made.
+
+After owner closed the host's0.9 game, deployed PERF3 candidate
+62E7464F26B19D76956FB5764133E2ED2FA4A93C7043E52496CCC5A1EFE9ECBC to
+Default and Client1. Both hashes independently re-read. Immediate21821512
+predecessor retained as main.dll.before-session-binding-20261104. Product0.9.0n
+b2217/public0.9.2163 unchanged;2155 production-source hashes frozen. Runtime
+resend reduction and FPS after installation are still unmeasured.
+
+Matching nine-member friend's revision2 ZIP:
+outputs/WatchersOfTheVoid-0.9.2163-performance-lighting-20261104-r2.zip,
+SHA2569162AC9176D4DC534DD2C5F6F7A1D9A7402B0F91DC2614CF6D36CE4A4255460E.
+Extraction/hash and disposable-profile install/reinstall/restore/version/lock/
+checksum checks PASS. Earlier ZIPs retained unchanged. Laptop testing deferred
+pending restart evidence; packaging is not evidence of a restart fix.
+
+Additional rendering limit: the last native game session rewrote Engine.ini
+DefaultGraphicsRHI back toDX12. Saved the rewritten file as evidence and restored
+that one entry toDX11 again after the game closed. Shadow preset1 and GUS FPS0
+remained. Native lib applies saved settings via SetGraphicsRHI, so an ini-only
+restore is not proven persistent across load. No readonly lock or story-save
+edit was applied; set/check the in-game video API when safe to continue.
+
+## Repeated unchanged state sends — PERF3 — 4 November 2026
+
+- [x] PERF3a: balance SetSession now resets its epoch/delivery/pending state only for a different session pointer or session-start serial. Same-binding installs preserve accepted recipient totals and pending client load/HUD retries.
+- [x] PERF3b: serverbox Install follows the same binding boundary, preserving recipient delivery, one-second poll cadence and client native/skin debt. DriveWatches still runs on repeated installs so unresolved watch registration continues.
+- [x] Production balance/serverbox fixtures reproduce the real Install-before-Tick orchestration for600 frames, then due polls, changes, readiness, refused sends, occupant replacement, explicit replay, world/session replacement, null retirement/rebind and pending client apply. Each lane's old reset-every-install source is a compiled negative control rejected by assertion. Existing lifecycle/repair/economy tests pass too.
+- [ ] Matching final-build runtime send-rate/FPS acceptance remains unperformed by the implementation agent. No global tick/task budget or join replay semantics were changed.
+
+Cause: net_pump invokes subsystems::Install each gameplay frame to retry unready observers. balance SetSession and serverbox Install instead unconditionally cleared completed delivery ledgers every call; serverbox also reset its poll timer and pending native client apply. Their ordinary Tick then resent unchanged rows every frame. The local host21821512 log recorded the same balance92 and serverbox54 state59 times during20:28:20, without corresponding repeated connect-snapshot logs. ConnectReplayForSlot was not the repeating source; explicit join/reload requests still intentionally rearm delivery.
+
+Bounded nearby audit: server_upgrade, upgrade, daily_task and weather_badSun refresh bindings/watch readiness without the same destructive per-frame ledger reset; event_active/event_fire scope resets to binding/world changes. grayboar's Install epoch increment has no analogous delivery-ledger reset and no evidenced packet flood here; it was left unchanged.
+
+The owner's remote laptop restarted through startup logo/sign-in/relaunch. It is a separate machine from the local RTX3060Ti host. Host packet spam is an observed performance defect; it does not establish the cause of the laptop's hard restart. Laptop evidence collection belongs to the parent investigation.
+
+## Client switches and optimization review — 4 November 2026
+
+Final combined Release installed in Default and Client1 after game-process,
+exclusive-lock, old-hash and package/product preflight. Both re-read as
+21821512BD3E45D52949687399FAD599E2083C47C9924C696FDF4ED374BE2999
+(28,552,192 bytes;0.9.0n b2217). Each immediate2492 predecessor is retained as
+main.dll.before-performance-lighting-20261104. Frozen2155-source manifest and
+deployment receipts: work/client-light-switch-20261104. Adjacent ATV/flashlight
+source hashes remain unchanged. No gameplay acceptance or measured FPS claimed.
+
+Owner subsequently explicitly requested a friend's ZIP, superseding the previous
+no-ZIP instruction for this delivery. Created outputs/WatchersOfTheVoid-0.9.2163-performance-lighting-20261104.zip;
+SHA25696D858CC8E97DFBCCF8BDA198C2483695BDEA8EB355930EF4E07C3532D72D3A0.
+Nine members verified by extraction/hash; same DLL as both local profiles. Tested
+install, idempotence, restore and wrong-version/locked-file/bad-checksum refusals
+on a disposable profile. ZIP contains no user saves/settings/identities; local
+DX11/shadow changes are not copied to the friend. Older archives are untouched.
+
+- [x] LS1: preserve the intervening local2492C08B light discovery fix. IsLightRoot/IsLightSwitch now classify solely by class, resolving an absent base cache; actual key/state/native-call accessors explicitly retain IsLive guards. The scan hub caches one representative's class verdict, so its retirement must not hide every living instance of that class. Only light/switch adapters allow a portable cooked identity without a native save Key. Base actors do have authored keys; missing native keys alone did not explain the earlier zero indexes.
+- [x] PERF1a: replace InstanceOffset's single-class thrashing with a bounded32-class working set and last-class fast path. Cache positive/missing results, validate slot+serial on hits and after resolution, and resolve again after class reuse. Larger working sets may evict/re-reflect but retain correct offsets.
+- [x] PERF1b: remove successful-resolution INFO logging even on eviction. Missing-field warnings remain on fresh cache entries.
+- [x] PERF2: parent restored only the unsafe optimization edits in the Desktop clone's game_thread.cpp/prop_census.cpp; normalized files equal canonical. Canonical pump/reseed limits and existing-ID refresh behavior were already intact.
+- [x] Parent restored Engine.ini DX12 to the game's DX11 default and sg.ShadowQuality0 to1 (the minimum native preset that retains shadow/light-function support). Receipt and immediate prior files: work/client-light-switch-20261104/render-config-repair.json and render-config-before. All other lines and the native saved180FPS/GUS0 limit were preserved.
+- [ ] Rendered base/satellite switch authority, repeated presses/breaker behavior, join parity, host night darkness and FPS/stutter acceptance on the final matching build remain unperformed here. Current remote flashlight shadow disabling is preserved; it could affect that light's wall occlusion, but no observation establishes it as the general night-brightness cause.
+
+Evidence correction: the initial17:44 log had zero light/group indexes, but newer19:00 client and19:35 host logs already show42/42 with matching hashes and successful client state applies. Both profiles had meanwhile been replaced externally with2492C08BABADEB5293561A865A13AB319133B4E7DAC178491C3C17C36E48FE98. The earlier6DA6B174 baseline and zero-index log are historical, not proof of a remaining failure on2492. Current cooked map census finds41 switch exports (14 authored keys) and42 roots (15 authored); satellite child actors account for omitted-key cases. Source/extracted fixture checks are separate from rendered acceptance.
+
+Owner correction: prior ATV seated test1 is still broken; flashlight test2 has not been checked; honking is now confirmed. These supersede the older blanket checklist wording only for those specific subcases. ATV and flashlight implementation were not changed by this review.
+
+## Owner playtest feedback — 4 November 2026
+
+Follow-up checklist: (1) walking mannequin checks reported working; (2) ATV and
+ragdoll checks otherwise "seemed to work", but honking could not be tested this
+round; (3) hostile encounter checks deferred to natural play to avoid spoilers;
+(4) Pyramid checklist reported "working alright". These are owner reports, not
+independently observed acceptance of every role or checklist subcase. They
+supersede deployment-time pending status only for the reported checks. No new
+bug reported, code/deployment changes made, or friend ZIP created for this feedback.
+
+## Entity continuation — 4 November 2026
+
+Owner says Continue. Both installed profiles had a newer42819852 DLL, not the
+prior entity4C3F7CEF build. Current source also contains newer garage/dish/Roomba/
+startup work. Preserve it: nine source/build-list hashes recorded before this
+batch; all nine still match. No VotV process was running at the initial check.
+No rendered encounter acceptance found in the latest log.
+
+- [x] ENT5a: restore native Pyramid montage play rate together with elapsed seek.
+- [x] ENT5b: clear stale wispTarget before consumed-tail native del; never destroy
+  a different live wisp while reconstructing a consumed encounter's tail.
+- [x] ENT5c: preflight timelines and bind actor/animation/timeline incarnations;
+  revalidate the live animation binding and session after native getters/callbacks.
+  Tail completion remains bound to the original animation across ticks.
+- [x] ENT5d: matching active gather snapshots correct clocks without replaying
+  notifications/audio/reached-check; a different active target retains pending.
+- [x] ENT5e: duplicate consumed snapshots update the current bound tail without
+  starting another montage or invoking del again. Legacy eight-byte relay retained.
+- [x] ENT6a: dead name/keyed watch registrations retain their permanent refusal
+  instead of allocating another doomed slot on each Install retry; equivalent
+  literal-value live/settled queries match the same registration identity.
+- [x] ENT6b: remove five impossible class-local K2_DestroyActor watches from
+  deer, centipede head/segments and mannequins, plus their unused cancellation
+  handlers. Actor's inherited native function is not a class-local script body.
+  Preserve actual lifecycle rails and mannequin interaction/native timing.
+
+Runtime evidence: latest game log23:19:20 onward repeatedly reports these five
+missing class-local functions; at23:20:09 the name watch table is full at3072
+keyed slots. This is an observed hook-registration failure, not proof that any
+particular encounter symptom was caused by it. Evidence saved under
+work/entity-followup-20261104/watch-exhaustion-before.txt.
+
+Actual production registration/resolution stress fixture PASS:14000 refused
+retries retain capacity; native/late-class failures, equivalent text identities,
+valid reopen and3000 feature installs;1100 later legitimate verbs remain live
+(2206 slots). Three mutation controls rejected. Existing1100-watch/eight-reopen
+capacity fixture PASS. Mannequin controller (including invalid-native-watch
+control) and nearest-target regressions PASS. Pyramid actual playback helpers
+and pending replay dispatcher PASS with ten rejected mutations; current extracted
+helper matches production source exactly. Tests mock engine boundaries and do
+not establish rendered gameplay. Existing garage/Roomba tests pass their copied
+logic fixtures; this is not independent production/runtime validation of that
+newer work. Release build, ABI import drill and required loader exports PASS.
+
+Current limits: no global gather sequence deduplication after a tail binding
+has already ended, and reflective metadata/partial native-call failures can
+still reject a restore. No complete deer/centipede behavior adapter is claimed.
+Broader entity attacks/effects backlog and previous owner acceptance remain open.
+No ZIP, save/config edits, event forcing, or public version/protocol changes.
+
+Installed the follow-up after both target DLLs passed exclusive-lock, old-hash,
+game/protocol and manager-version checks. Default and Client1 both re-read as
+F65DCC2BB291831A6ADD96751603931F32D5BB71FF8682C10C82865CD8B6405D,
+28,424,192 bytes /0.9.0n b2217. Rollback copies named
+main.dll.before-entity-followup-20261104 retain42819852 in both profiles.
+Final source hashes recorded; no production source newer than candidate. Existing
+friend r2 ZIP retains C96408F9. Fresh owner gameplay acceptance remains pending.
+
+## Combined entity test update — 3 November 2026
+
+Owner authorized the four-item follow-up, then supplied Antigravity chat
+5e134536-ac25-4f8a-96a2-4362b0d61b5e and work/entity-combined-20261103/codex-handoff.md.
+Reviewed actual edits rather than adopting the suggested upper-ID-bit encoding.
+
+- [x] ENT1: Hoel/verified shot direct damage reaches the victim's local native
+  player through PlayerHit. Resolve canonical WorldActor sources as well as NPCs;
+  enroll early projectile births before their hit. Deliver native ignite fuel once
+  per dispatch using the shared PRE scope mark, including nested dual-watch calls.
+  Add exact tentacleBallShot/kavotiaShot producer/output routes, exclude transient
+  shots from join birth, and refuse a cosmetic mirror unless all five native
+  damage/force fields are verified FloatProperty and neutralized before BeginPlay.
+  Retain the existing separate native explosion transport; do not forward it again.
+  Rejected unproven gun-stealer/centipede hit admission from the handoff because
+  their mirror attack authority was not established. Cosmetic shot traces still
+  require host/client visual parity testing; no complete combat-family verdict.
+- [x] ENT2: preserve unloaded/readiness-blocked valid NPC spawns in a bounded
+  64-row/15-second queue, at most four retries per 100ms, deduplicated without
+  extending expiry. Retain latest validated pose, cancel on destroy/world/disconnect,
+  prune a dead actor's old identity, and reject reentrant session/world changes.
+  Explicit pak-verified paths load the 29 allowed base leaves; no wire-derived
+  arbitrary path. Loaded subclasses still pass the normal ancestry gate.
+- [x] ENT3: native player-0 Pawn/Character reads for exact Kavotia, Tentacle Ball
+  and Antibreather host NPCs prefer the nearest living world-ready player, with
+  tie stability and immediate invalid/departed-target exclusion. Preserve timers,
+  navigation and personal entities. This does not repair every native mainPlayer
+  cast, attack, camera check or creature family; existing broader backlog remains.
+- [x] ENT4: optional 32-byte PyramidGather join snapshot preserves the original
+  two IDs and carries actual native montage position/rate and all three timeline
+  positions/directions. Restore crossed notifications plus playback; reconstruct
+  the post-consumption arm-close without resurrecting a retired wisp. Preserve
+  the eight-byte live/legacy relay. No ID-bit packing, forced event or clock reset.
+
+Focused production fixtures: pending lifecycle/class-load trust/hit classification
+PASS plus four faults; pyramid receiver PASS plus three faults; exact target
+selection PASS plus three faults; nested ignite delivery PASS plus one fault.
+Existing events/serverbox/event-slot, mannequin target/four faults, native ragdoll,
+ATV planar, Hoel endpoint/authority and Kavotia fixtures PASS. Initial standalone
+Kavotia invocation missed its grayboar_stubs include path; corrected invocation
+passes all seven printed groups. No gameplay acceptance is claimed by fixtures.
+
+Release build passed. MSVC installation is portable/unregistered; restored the
+existing V: work mapping and supplied the installed MSBuild version to CMake's
+portable-instance selector. No source toolchain/version change. Final DLL/hash,
+ABI and installation evidence is recorded in work/entity-combined-20261103 and
+outputs/WatchersOfTheVoid-entity-combined-test. No friend ZIP, save, identity or
+game setting changes. Fresh two-player damage, spawn/rejoin, targeting and
+pyramid animation/audio acceptance remains for the owner.
+
+Installed after current process check and exclusive target-DLL preflight: Default
+and Client1 both SHA256 4C3F7CEF06C5FC1C687E97E1E82FBFDC04ECF6A5851DB1C15E00FC532DD209A8,
+28,414,464 bytes / 0.9.0n b2217. Verified RG2 rollback copies named
+main.dll.before-entity-combined-20261103 (15A648...). The final corrected regression
+chain exits0; loader exports start_mod/uninstall_mod and ABI negative drill pass.
+Both installed hashes re-read after installation; 2,151 production source hashes
+recorded, none newer than the candidate DLL. Test checklist and deployment receipt
+are in outputs/WatchersOfTheVoid-entity-combined-test. Owner gameplay pending.
+
+## Rapid ragdoll recovery / impact follow-up — 3 November 2026
+
+- [x] RG2: hand camera POSITION to native recovery and prevent model/physics
+refresh from restarting a body during native get-up. Desktop/ragdollfun.mp4
+(42.56s1440p) predates RG1: fast C/Space and jump/C/Space can displace view under
+map/into sky; another C restores it. Owner confirms only affected POV moves, other
+peer sees body near tower. Screenshot shows displaced aerial view and body near
+tower. Owner sees underwater view without drowning damage, consistent with camera
+separated from physical player; no direct evidence that gravity itself is disabled.
+Native wakeup uses camera-manager position +50 for its teleport and owns the
+camera reparent/relative transform timeline. Our recovery helper also restored a
+captured world position after changing facing, violating that position ownership.
+RefreshLocalRagdollModel had no native isWakingUp/isRagdoll phase exclusion.
+No arbitrary teleport clamp, gravity/movement override or recovery delay planned.
+
+RG1 owner confirms fall damage now occurs. Clarifies blood drips normally; missing
+sound is the remaining presentation complaint. Lower damage is compared with an
+upright fall, not unmodded ragdoll; do not infer a multiplier defect or equate
+different native damage paths. Audio still under investigation; RG1 peer-role
+acceptance not specified. RG1 retained in next local fix.
+
+Implemented recovery orientation-only restore (K2_SetWorldRotation), preserving
+native-parent position changes instead of restoring an obsolete world coordinate.
+Refresh checks native isWakingUp/isRagdoll; cancel pending entry/velocity work and
+never reconfigure/restart a recovering/retiring body. Preserve a ready body's
+presentation until native retirement; no movement/gravity override or timed input
+lock. Seven native fixture modes PASS and eight faults rejected, including old
+world-position restore and missing recovery-phase exclusion. Combined Release and
+ABI PASS; installed both unlocked profile DLLs with matching SHA256
+15A648DADACBA47CF97FCA7CF319FF5E55335EC8809EA70F16B6EBC60673F991,
+28,392,448 bytes/product0.9.0n b2217. Verified prior486E69 backups as
+main.dll.before-rg2-20261103. Evidence/local DLL at outputs/WatchersOfTheVoid-ragdoll-recovery-test.
+Actual rapid-input/view-displacement acceptance pending. No ZIP/save/config edits.
+
+Audio audit: upright landing has a dedicated falldamage cue; ragdoll physics
+impacts use material-driven sounds. Inspected world_sound_sync/skin_effects do
+not establish a muting cause for this case. Missing sound is still unconfirmed
+against equivalent vanilla ragdoll; no forced cue, damage/gore multiplier or
+claimed audio fix. Blood is normal per owner's correction.
+
+## Ragdoll fall damage — 3 November 2026
+
+- [x] RG1: restore local selected-rig impact notifications after physics asset
+replacement/rebuild. Owner reports ragdoll fall immunity on both host/client,
+predating ATVH4. Host clip15:42:53 shows higher ragdoll fall without comparable
+damage flash, then a lower upright fall with strong red damage feedback. Native
+ragdollMode retargets physicsImpact to playermodel; comp_physicsImpact retargetHit
+binds OnComponentHit but does not enable notifications. Native ragdoll component
+bNotifyRigidBodyCollision=true and kel_lmao_Physics has notified bodies; selected
+kerfurOmegaV1_Physics has17 body setups with omitted DefaultInstance (notify false).
+Current StartBodySim rebuilds asset bodies without restoring their notifications.
+Restore component/all-body notifications only for the owned local ragdoll, preserve
+native damage formula/settings/ownership and remote proxy behavior. No new ZIP.
+ATVH4 owner reports improved, not yet fully confirmed.
+
+Implemented in StartBodySim with explicit localImpacts admission at the native
+construction and deferred local refresh paths. After rebuild, enable component
+notifications and runtime body notifications below the selected skeleton's actual
+root bone (include self), then start simulation. Use reflected
+SetNotifyRigidBodyCollisionBelow; native-only SetAllBodiesNotifyRigidBodyCollision
+is deliberately not dispatched by name. Remote StartPlayerRagdollSimulation keeps
+the default false; shared physics assets and native damage formula/rules unchanged.
+PASS six production ragdoll fixture modes including local notifications, remote
+exclusion, metadata/call failure and component recycle. All six fault controls
+rejected, including missing notifications and omitted local admission. Existing
+camera/momentum/construction/recovery checks pass. Fixed the runner's expected
+native-stderr capture so intentional faults can be checked under Windows PowerShell.
+Combined Release/ABI PASS. Owner closed both0.9 games; exclusive target-DLL lock
+preflight then deployment/hash verification passed in Default and Client1.
+New SHA256486E69A47C8C1843FB0856B75A9968D6DEADD534864226EF3FFE90F08DF50661,
+28,392,448 bytes/product0.9.0n b2217. Prior ATVH4 DLLs retained and verified as
+main.dll.before-rg1-20261103 (789501). Local DLL/evidence in
+outputs/WatchersOfTheVoid-ragdoll-local-test. No saves/settings/identities or ZIP
+changes. Fresh physical host/client fall acceptance remains pending.
+
+## Large event entity audit — 3 November 2026
+
+Owner requests pyramid and other large entity coverage review while testing ATVH4.
+Read-only source/native0.9 audit completed; report outputs/large-entity-audit-20261103.md.
+Pyramid has dedicated spawn/pose/heading/look/target/gather/lifetime/join plumbing,
+but its two-ID gather payload lacks phase time; native replay restarts montage at0.
+Kavotia state/cosmetics fixture passes; its native kavotiaShot_C ->
+tentacleBallShot_C -> Actor projectile has no shared route. Ramiel geomOcta_C
+is a native direct Character subclass missing from both curated replication lists.
+Igetis, tank, Soltomia and large ships have body routes but incomplete specialized
+effects/actions. Existing Hoel endpoint fixture passes; full damage parity remains
+unproven. No events forced, game/config/save/DLL changes or new ZIP. Fresh actual
+two-peer encounter acceptance remains open; no broad 'events work' verdict.
+
+## ATV unbraked parked drift — 3 November 2026
+
+- [x] ATVH4: stop mirror-only parked drift without suppressing genuine
+unbraked authority movement. Owner retested the 9F730A build and reports the
+ATV still rubberbands while parked with brakes OFF; mannequins not checked.
+Fresh 01:39–01:46 logs prove Advanced corrections/readback execute. Client
+coopatv1 drifts horizontally from 110cm error at01:42:11 to 183cm at01:42:16,
+then a236cm WARP at01:42:18 despite host velocity about1cm/s and RESTPOSE.
+Readback maxPoseError0 and stable ride height do not establish ongoing physics
+agreement. Diagnose the remaining mirror motion/force state; preserve actual
+brake input, unbraked coasting, carry/drive authority and all mannequin changes.
+No new friend archive requested; existing r2 ZIP stays unchanged.
+
+Implemented coherent planar velocity matching across the native four simulated
+roots (mesh/frontWheel_L/frontWheel_R/backWheelRoot), verified in the 0.9 native
+asset. Apply the same XY delta to all four, preserving their relative and Z
+velocities and all angular velocities; no braking or simulation-state edits.
+Stable authority poses use measured planar travel, preserving 1cm/s unbraked
+coasting while avoiding suspension velocity noise. Horizontal error converges
+with the actual idle packet interval, even after the vertical replacement budget
+is spent. Horizontal error no longer triggers parked teleports. Initial/large
+snaps also align common planar momentum; vertical placements clear obsolete XY
+bias. Frame metadata, all parts and native lifetime are validated before mutation.
+New PLANAR logs compare mirror/desired/wire velocity and actual brake bit.
+
+PASS 12 corrector scenarios and 7 rejected faults, including 60s mirror-only
+drift, 120s host 1cm/s unbraked coast, 2/2.5s packet cadence, stable-pose velocity
+noise and snapshot residual momentum. PASS production wrapper 62 checks and 3
+rejected faults (root-only correction, lost relative motion, vertical zeroing).
+Existing recovery/honk/spawn, native Advanced shape and old-marker rejection
+checks pass; actual atv.cpp/atv_sync.cpp/hit_guard compile against real headers.
+Combined Release and ABI drill PASS. Installed Default and Client1 after exclusive
+target-DLL lock preflight, matching SHA256
+789501042DD8238861372D32944A4031904B7EC9E9C39A9DEE0E4516E84AC7DE,
+28,391,424 bytes/product0.9.0n b2217. Both preceding9F730A DLLs verified as
+main.dll.before-atvh4-20261103. Local DLL/logs in outputs/WatchersOfTheVoid-atv-local-test.
+No game was running at installation; no save/config/identity changes. Existing
+r2 friend ZIP remains unchanged; no ZIP was created or repacked for ATVH4.
+Native calls/PhysX remain mocked by fixtures; fresh rendered brakes-off acceptance
+is pending. Mannequins remain untested by owner, with prior fixes retained.
+
+## Mannequin duplicate identity and ATV rig shape — 3 November 2026
+
+- [x] MN10: reconcile exact-key/current-world walking mannequin twins against
+one authoritative host Prop mirror. Fresh01:15:18 clip visibly separates two
+overlapping copies when client grabs. Logs prove canonical actor/eid1 and a
+second local actor/eid33887 share the same key; host re-assert cannot rebind that
+already locally owned twin. Main canonical grab handoffs do reach both peers.
+Retire only proven unheld local twins; defer held bodies safely and use a narrowly
+validated canonical held-stream alias if needed. Never adopt by proximity/class,
+steal an unrelated identity or destroy a held body. Native birth route still
+unproven; inspected walker-spawner routes are already gated. Implemented a narrow
+client identity controller: unique current host mirror, exact native key/class,
+current world/slot/serial and local non-mirror ownership are required. Retire only
+unheld twins through echo-suppressed native destruction. A held twin retains its
+physical handle while its first grab/poses/release use the canonical host identity;
+temporarily hide and disable collision only on the proven canonical rendering,
+then restore its captured flags. Missing render metadata never authorizes a local
+duplicate spawn. Delayed/failed destruction is bounded, and cleanup cannot drain
+a recycled actor's identity. No generic adoption or native pacing rewrite.
+
+- [x] ATVH3: replace corrector teleports that reconstruct native wheel geometry
+with native teleportVehicleAdvanced over all four current part transforms under
+a rigid root delta. Keep canonical fresh-spawn teleport unchanged. Reject unread
+or invalid native fields before mutation. End the parked retry episode only on
+actual authority motion/ownership/reset, not a 10s clock. Fresh logs show ATVH2
+rest gates executing but repeated reconstructive teleports remain. Real PhysX
+acceptance still requires the exact fresh build. Implemented native four-part
+getter/Advanced setter with a quaternion rigid delta, exact metadata preflight,
+finite values and actor/world lifetime guards through the final readback. All
+three correction sites use it; fresh spawning retains its original placement.
+Parked correction budget does not rearm merely from time or a receive gap.
+Keyed decision/native part readback logs support the next actual-game retest.
+
+Focused production fixtures pass: mannequin identity 54 checks and 8 rejected
+faults, including actual held-stream blocks and first-grab-before-controller,
+late mirror conflicts, delayed destruction and native-call recycle/world changes;
+ATV corrector 8 scenarios and 4 rejected faults; native Advanced shape checks,
+32 missing/wrong-size field cases, final-readback lifetime cases, old-marker
+mutation rejection and real-header wrapper/corrector compilation. Combined
+Release and ABI drill pass. Installed both Default and Client1 with matching
+SHA256 9F730A7525F6D56957833BC368DB8FEE98514A045F2C8BD0A8B689106E99DB38;
+each prior 00EE2FFD DLL is retained as main.dll.before-fixes-20261103-r2.
+Only the selected unlocked profile DLLs were replaced. Existing r2 friend ZIP
+was already completed before owner said it was unnecessary for local testing;
+owner then said to leave it if already made. It remains unchanged. Its 9 members,
+safe paths, hashes, clean extraction and extracted install/lock refusal/backup/
+idempotence/restore checks passed. Rendered acceptance for both reported defects
+remains open until the exact fresh build is tested.
+
+## Mannequin live binding repair — 3 November 2026
+
+- [x] MN8: bind client sight/stand to the authoritative host Prop mirror
+eid/name/actor identity. Native keys can intentionally differ after held/driven
+fuzzy adoption; do not demand the host key in the client's native-key tracker.
+Fresh 1.mp4/2.mp4 clips are both the client scientist's POV; the Ariral/cat
+character is the host (owner clarification). Both running profiles load BA7AB347;
+logs prove native local-view sampling and Hello/Ack succeed, but no Stand/Sight
+data is accepted. Client logs show all three walkers adopted with transform and
+rekey skipped because held/driven ownership already applies, then canonical
+host-eid mirrors bound. The prior fixture falsely assumed native and wire keys
+were always equal. Preserve native AI and generic adoption/physics behavior.
+Production fixture now covers the actual divergent native/wire-key shape and
+unmodified host Stand -> client native sample -> host Sight flow: 75 checks and
+11 rejected faults; reliable routing gate passes. Included in the combined build
+below; rendered acceptance still required.
+
+- [x] MN9: restore client walking-mannequin hover/pickup admission while its
+replica is parked kinematic. Source-bound native physics-query answers must be
+limited to the real local interaction; wake only the real pickup component at
+native grab, preserving frozen/static/foreign/remote-held exclusions and host
+drive yielding. Owner thinks ordinary mannequins still interact normally.
+Dedicated production callback fixture passes 48 checks and 8 rejected faults;
+controller/pacing fixture and its 7 controls also pass. Ordinary mannequin,
+frozen/static, remote-held, foreign/stale and mod-replay paths remain excluded.
+
+- [x] ATVH2: distinguish stationary authoritative ATV poses from suspension
+velocity spikes. Confirm a fixed 5cm/3deg pose anchor over 1s only while unoccupied
+and ungrabbed; retain real accumulated coasting, drive/carry, snap/throw/handoff
+and packet-gap recovery. The clip's still-ATV POV is host; first POV is client.
+Source/log evidence supports the correction defect; PhysX acceptance is pending.
+Corrector checks pass 7 production cases and 3 rejection controls; recovery and
+real-header compile checks pass. Recovery honk spies now describe the actual
+primary/fallback names; production honk code unchanged.
+
+- [x] Combined Release and ABI drill pass. Matching DLL SHA256
+  00EE2FFD6239F468C51A97D04538C8BB4BB06F0EB55BEE36F2E6EB1769035362 installed
+  in Default and Client1. Previous BA7AB347 DLLs retained beside each as
+  main.dll.before-fixes-20261103. No saves/settings/identity changes.
+- [x] Profile-specific DLL-lock preflight replaces the overbroad any-VotV guard
+  in this update's installers. User's separate game installation remained running;
+  both target 0.9 files were unlocked. Installer lock refusal/install/backup/repeat/
+  restore pass in a disposable profile with the separate game still running.
+- [x] Updated friend ZIP: outputs/WatchersOfTheVoid-0.9.2163-fixes-20261103.zip.
+  Nine safe members, every content hash and clean extraction verified. Evidence
+  and cumulative selected-file source patch: outputs/WatchersOfTheVoid-fixes-20261103.
+- [ ] Fresh 0.9 multiplayer acceptance: actual accepted Sight/Stand logs, client
+  mannequin hover/grab/carry/release, and parked ATV alongside carry/drive checks.
+
+## Native client mannequin sight and animation — 2 November 2026
+
+- [x] MN6: upgraded clients sample the same SkeletalMesh bounds,
+  bpCodeLib.isBoxInFrustum(localController, bounds) and WasRecentlyRendered(3s)
+  predicate as the native graph. A negotiated, identity-bound mannequin channel
+  reports both positive and negative observations. Native host ReceiveTick,
+  saw timer, anger, navigation and approach distance remain in control.
+- [x] MN7: upgraded clients use the host's actual AnimBP stand state; tiny
+  interpolation/physics corrections cannot override it. Carry bypass stays
+  first, with legacy motion/sight fallback when the new data is unavailable.
+- [x] Focused controller, native-wrapper, targeting and network checks pass;
+  network fixture has 59 checks, 8 rejected faults and the 243-kind routing gate.
+  Controller rejects 7 faults, wrapper 2, targeting 4. Real rendering is untested.
+- [x] Final Release and ABI drill pass. Installed matching SHA256
+  BA7AB347AEB1FA0BAC277C7A47A4A817F42E0789D1E070CD4AABDFDE013E2334
+  in Default and Client1 while games closed. Previous 2AEFFB4A DLLs retained as
+  main.dll.before-mannequin-native-sight-20261102 beside each installed DLL.
+- [x] Updated friend ZIP has 9 verified members and the same DLL. Clean extraction
+  and extracted installer/backup/idempotence/restore checks pass in a disposable
+  profile. Delivery: outputs/WatchersOfTheVoid-mannequin-native-sight and
+  outputs/WatchersOfTheVoid-0.9.2163-mannequin-native-sight-fix.zip.
+- [ ] User acceptance: client camera edges/partial visibility and wide FOV,
+  stand/walk presentation, natural hesitation, carrying, disconnect and rejoin.
+User clip shows brief visible steps and very close approach; the clip alone does
+not establish sustained movement under gaze. Native close approach is intentional.
+
+## Client-aware mannequin stalking — 2 November 2026
+
+- [x] MN4: host selects the nearest eligible living host/client. Keep a valid
+  target unless a challenger is both 20% and 2m closer; retain a valid angry
+  target. Invalid targets lose that preference on the next native path update.
+  Reject disconnected, transport-unready, world-unready, zero-generation,
+  dead/unposed, stale-body and wrong-world clients.
+- [x] MN5: scope distance and MoveTo redirection to registered walking mannequin
+  native graph calls. Preserve the native pawn, parameters, returned proxy and
+  completion delegates. One opt-in POD-return pre-hook permits one replacement
+  dispatch; the default void-hook signature guards stay unchanged. Hooks arm as
+  a pair; held/carrying mannequins keep the existing AI bypass.
+- [x] Target fixture and four injected faults, existing pacing/controller fixture
+  and five faults, actual native-hook fixture/guard-page checks, Release and ABI
+  drill pass. These checks do not execute real navigation or rendering.
+- [x] Installed SHA256 2AEFFB4A71FAE6CAD1CFC37DA9606F19000913C8A96BCD794AB1B80CDA971116
+  in Default and Client1 while games closed. Each preceding 8DF912E1 DLL is backed
+  up beside it as main.dll.before-mannequin-targeting-20261102.
+- [ ] Rendered acceptance: approach the closer client around obstacles; retain
+  native hesitation/gaze stops and safe carry/release; hand off after target
+  death/disconnect. Damage/attack targeting of other entities is outside this fix.
+Protocol/package versions, saves and settings are unchanged. Delivery and focused
+evidence: outputs/WatchersOfTheVoid-mannequin-targeting in the enclosing workspace.
+
+## Native mannequin pacing repair — 2 November 2026
+
+- [x] MN3: remove per-frame writes to native looking/saw/animation state on the
+  host. Native ReceiveTick owns hesitation, damping and movement speed. Remote
+  visibility is supplied during that decision; temporary sight is restored unless
+  the native seen transition took ownership and armed timer_saw.
+- [x] Tests cover native 10-20s hesitation using a 15s transition model, long
+  remote stares across timer expiry, disconnect, angry eligibility, held state and
+  cancelled-call cleanup. Five injected faults are rejected; Release and ABI pass.
+- [x] Matching 8DF912E11F628A2E785DE3DB6CC566BAD5CF9235E46E10391E055BA11FB4440E
+  installed in Default and Client1; ABABE9BF predecessors backed up beside each DLL.
+- [ ] Rendered stalking/physics acceptance remains. Earlier immediate look-away
+  unfreezing was an incorrect pacing requirement; native hesitation is retained.
+At this pacing checkpoint targeting still used the native host camera; MN4/MN5
+above supersede that limitation. Code inspection separately
+confirms killer-wisp host/client selection and owner-local eyer encounters; other
+creatures' targeting has not been exhaustively audited.
+
+## Mannequin follow-up — 2 November 2026
+
+Continue the latest Antigravity mannequin work from its messages/reasoning only.
+- [x] MN1: stop client walking animation while a mannequin is held locally or by
+  a remote hand, and rebase movement sampling on release.
+- [x] MN2: bind client animation history to the actor incarnation, with explicit
+  first-sample state and slot-safe pruning. World origin is a valid position.
+- [x] Current production controller checks cover host/remote visibility, looking
+  away, disconnected viewers, occlusion, held-state bypass and interaction admission.
+  Four injected faults are rejected. Release build and ABI drill pass.
+- [x] Installed matching ABABE9BF05DF563EFCA78615DB06FDCB5782CA9BF97A6FC30D486135BE8FB842
+  in Default and Client1; immediate 8D8EC12B predecessors retained beside each DLL.
+- [ ] Rendered multiplayer acceptance: carry/release without walking legs, gaze
+  stop/resume, disconnected client, and both mannequin types' ordinary interactions.
+The completed horn and native mannequin interaction changes remain. Controller
+fixtures mock engine and roster boundaries; they do not run native Blueprint AI,
+real raycasts, rendering or a full two-client session.
+
 ## Requested release 0.9.2163 (28 October 2026)
 
 Owner explicitly requested building 2163. Public package metadata, menu version
@@ -1641,3 +2191,33 @@ strongest initial-caller candidate, pending live confirmation. Evidence:
 `build/requested-events-native/crash-analysis-20261024.md`. Do not suppress the
 native guard. The owner confirmed the game disk is absent on 24 October, so
 current-DLL rifle/trowel/balance and real-peer event checks cannot yet run.
+
+## Local shared white lightning orb fix — 1 November 2026
+
+Named implementation items: HOEL1 host orb birth/pose/lifetime and join state; HOEL2 host beam presentation with client native damage refusal.
+- [x] HOEL1: native superFog_C -> HoelUfo_C and HoelUfo_C -> hoelUfoAttack_C exact output sources, WorldActor allowlist and host lifecycle.
+- [x] HOEL2: bounded endpoint birth bytes; client BeginPlay refusal/readiness; cosmetic particle endpoint and half-second hide; transient beams excluded from join snapshots; PE author cannot pre-enroll an empty beam.
+- [ ] Two-computer rendered encounter, sound/beam parity, host world consequences, event-end/rejoin and general event coverage acceptance remain unperformed.
+The patch does not change personal metaparanoia, protocol2217 or public package2163. It is a local custom build from matching baseline90fd9e6, not a new qualified upstream release.
+
+## Local cadence repair — 2 November 2026
+
+- [x] CAD1: restore pre-Antigravity every-frame subsystem pumping, including client interpolation/application and authoritative clock sampling; keep each subsystem's existing elapsed-time throttles.
+- [x] CAD2: retain and verify the reseed drain's32-candidate cap alongside its elapsed-time budget.
+- [ ] Rendered host/client drone movement, desk cursor/simulation smoothness, accelerated clock and performance comparison remain user acceptance checks.
+No package/protocol bump and no unrelated gameplay repairs are included.
+
+## Held ATV mirror correction — 2 November 2026
+
+- [x] ATVH1: distinguish a stationary carried ATV from a parked ATV in the receiver's rest/velocity gates, preserving ordinary parked-rig protection and authority admission.
+- [x] Production-corrector fixture reproduces the old gravity/drop failure and verifies held correction, grab/release/throw, parked protection and failed-warp refusal. Release build and ABI negative control pass.
+- [x] Installed matching DLL 67A1FEA7099A6D6696BBC8540334006D9B4D26E9327517DB3071A4B37A81DC2B in Default and Client1 after both games closed; each immediate BA9FFAD0 predecessor is retained as main.dll.before-held-atv-fix-20261102.
+- [ ] User rendered two-viewpoint acceptance: hold an ATV still in air, move/rotate it, release it, and compare both grab directions. The fixture uses simple gravity and mocked engine calls, not the complete native constraint rig.
+
+## Friend package — mannequin targeting local build — 2 November 2026
+
+- Created `outputs/WatchersOfTheVoid-0.9.2163-mannequin-fix.zip` using the matching targeting DLL already deployed in Default and Client1. DLL SHA256: `2AEFFB4A71FAE6CAD1CFC37DA9606F19000913C8A96BCD794AB1B80CDA971116`.
+- Custom update ZIP follows the previous friend-package folder/installer layout, with only `main.dll`, install/restore scripts, README, checksum note, LICENSE and third-party notices. It contains no settings, saves, identity data, backup DLL, logs, or source. Sidecar install note is `outputs/WatchersOfTheVoid-0.9.2163-mannequin-fix-README.md`.
+- Installer requires the existing 0.9.2163 package, VotV 0.9.0n/protocol b2217 and shimloader 1.1.7; it backs up the current DLL locally before replacement and supports an explicit profile mod folder.
+- Archive was safely extracted under `work/friend-package/verify2`; 9 members, safe paths, exact member set and contents, and extracted DLL hash verified. The DLL in the source output and Default/Client1 deployments matched. LICENSE and THIRD-PARTY-NOTICES hashes match the previous friend ZIP.
+- This is a local test build with focused source tests/ABI evidence. No new full release qualification or gameplay acceptance was performed. The canonical `dist/ElvardFIC-WatchersOfTheVoid-0.9.2163.zip` was absent; this update archive does not alter dist or qualification records.

@@ -26,6 +26,7 @@
 #include "coop/net/session.h"
 
 #include "ue_wrap/engine/engine.h"
+#include "ue_wrap/actors/hoel_ufo.h"
 #include "ue_wrap/core/game_thread.h"
 #include "ue_wrap/core/log.h"
 #include "ue_wrap/core/reflection.h"
@@ -131,6 +132,15 @@ bool IsAllowlistedClassNameW(const std::wstring& nm) {
 // connect snapshot, which the repair path re-fires per slot.
 void FillBirthBlob(coop::net::WorldActorSpawnPayload& p, void* cls, void* actor) {
     p.birthLen = 0;
+    if (actor && cls && R::NameEquals(R::NameOf(cls), L"hoelUfoAttack_C")) {
+        ue_wrap::FVector endpoint;
+        if (ue_wrap::hoel_ufo::ReadBeamEndpoint(actor, endpoint)) {
+            static_assert(sizeof(endpoint) <= sizeof(p.birth));
+            std::memcpy(p.birth, &endpoint, sizeof(endpoint));
+            p.birthLen = sizeof(endpoint);
+        } else UE_LOGW("hoel-ufo: unreadable beam endpoint, recipient will refuse beam eid=%u",p.elementId);
+        return;
+    }
     if (!actor || !coop::coingun_sync::IsCoinClass(cls)) return;
     const int32_t pts = coop::coingun_sync::ReadCoinPoints(actor);
     if (pts < 0) {
@@ -245,6 +255,10 @@ bool WorldActorSuppress_Interceptor(void* self, void* params) {
         void* actorClass = *reinterpret_cast<void**>(
             reinterpret_cast<uint8_t*>(params) + g_spawnActorClassParamOff);
         if (!actorClass || !IsAllowlistedClass(actorClass)) return false;  // not a WA; let it run
+        // Beam targets are assigned between BeginDeferred and FinishSpawning.
+        // Only the source-gated native catch may enroll this birth after finish;
+        // the PE pre-author must not reserve an eid with an empty endpoint.
+        if(R::NameEquals(R::NameOf(actorClass),L"hoelUfoAttack_C")) return false;
 
         coop::net::WorldActorSpawnPayload p{};
         // This producer runs before BeginDeferred and holds the params and the class, never an
@@ -484,7 +498,7 @@ void TickPoseStream() {
         // the cap, so the sent pose is only recorded for a pose about to be batched; recorded
         // before truncation, an actor whose final resting tick was the truncated one would latch
         // that pose as sent and freeze its mirror mid-flight.
-        if (!el->PoseChangedSinceLastSend(loc, rot)) continue;
+        const bool rootChanged = el->PoseChangedSinceLastSend(loc, rot);
         coop::net::WorldActorPoseSnapshot snap{};
         snap.elementId = static_cast<uint32_t>(el->GetId());
         snap.x = loc.X; snap.y = loc.Y; snap.z = loc.Z;
@@ -506,7 +520,15 @@ void TickPoseStream() {
             // The chase axis, the live wisp-target identity (0 is idle); the mirror selects the
             // native chase look-at branch with it.
             snap.auxTargetEid = coop::piramid_sync::ReadHostWispTargetEid(actor);
+        } else if (el->GetTypeName() == "hoelUfoAttack_C") {
+            ue_wrap::FVector ep{};
+            if (ue_wrap::hoel_ufo::ReadBeamEndpoint(actor, ep)) {
+                snap.auxX = ep.X; snap.auxY = ep.Y; snap.auxZ = ep.Z;
+            }
         }
+        const bool auxChanged = (el->GetTypeName() == "piramid2_C" || el->GetTypeName() == "hoelUfoAttack_C") &&
+                                el->AuxChangedSinceLastSend(snap.auxYaw, snap.auxX, snap.auxY, snap.auxZ, snap.auxTargetEid);
+        if (!rootChanged && !auxChanged) continue;
         batch.push_back(snap);
     }
     for (const DeadWa& d : dead) {
@@ -566,6 +588,9 @@ void QueueConnectBroadcastForSlot(int peerSlot) {
     int sent = 0, unbound = 0, unread = 0;
     for (coop::element::WorldActor* el : elems) {
         if (!el) continue;
+        // A beam is a transient cue, never historical join state. Its native
+        // .5-second flash can already be over while its audio actor stays alive.
+        if(el->GetTypeName()=="hoelUfoAttack_C"||el->GetTypeName()=="tentacleBallShot_C"||el->GetTypeName()=="kavotiaShot_C")continue;
         void* actor = el->GetActor();
         if (!actor || !R::IsLiveByIndex(actor, el->GetInternalIdx())) { ++unbound; continue; }
         // A row at the origin or at a zero facing would misplace the joiner's mirror: an actor whose

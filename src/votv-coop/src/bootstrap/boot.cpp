@@ -36,6 +36,8 @@
 #include "ue_wrap/core/script_gate.h"
 #include "ue_wrap/core/sdk_profile.h"
 #include "ue_wrap/engine/actor_end_play.h"
+#include "ue_wrap/devices/garage.h"
+#include "ue_wrap/devices/roomba.h"
 
 #include <windows.h>
 
@@ -265,6 +267,8 @@ DWORD WINAPI BootThread(LPVOID rawTag) {
                     tid, bootTid, tid != bootTid ? "DIFFERENT thread -- OK" : "SAME -- WRONG",
                     n);
             UE_LOGI("==== GAME-THREAD CONTEXT: LIVE ====");
+            ue_wrap::garage::EnsureResolved();
+            ue_wrap::roomba::EnsureResolved();
             // The local boot hook, when this box has one; nothing in the public build.
 #ifdef VOTVCOOP_HAS_LOCAL_BOOT_HOOK
             coop::local_boot::OnGameThreadLive();
@@ -273,9 +277,14 @@ DWORD WINAPI BootThread(LPVOID rawTag) {
         UE_LOGI("boot: game-thread dispatcher installed; self-test task posted");
         // The script-body gate beside it: the second detour, on the VM's own body loop, so a
         // Blueprint-internal call can be watched and refused per call.
-        if (!ue_wrap::script_gate::Install())
+        if (!ue_wrap::script_gate::Install()) {
             UE_LOGE("boot: the script-body gate did not arm; Blueprint-internal calls are invisible, "
                     "every watch will be refused, and no multiplayer session will start (MV-J32)");
+        } else {
+            ue_wrap::script_gate::Acquire("ue_wrap_devices");
+            ue_wrap::garage::Install();
+            ue_wrap::roomba::Install();
+        }
         // Every actor's end of play, by any route, from one detour on the engine's own AActor::EndPlay.
         ue_wrap::actor_end_play::Install();  // logs its own failure
         // The entries UE4SS also patches still hold our jumps over the functions' own bytes.

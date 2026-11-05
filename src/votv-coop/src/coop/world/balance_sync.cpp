@@ -61,6 +61,11 @@ void Deliver(net::Session* s, int slot, int32_t points, uint64_t epoch, uint32_t
 }  // namespace
 
 void SetSession(coop::net::Session* session) {
+    // Install is retried every frame; only a new binding owns a fresh delivery
+    // ledger. Resetting the same session would resend every unchanged balance
+    // and discard client load-window/HUD retry state on each install poll.
+    if (g_session.load(std::memory_order_acquire) == session &&
+        g_serial.load() == net::session_serial::Current()) return;
     ++g_epoch;
     g_delivery = {};
     g_pending.store(0);

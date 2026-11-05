@@ -38,6 +38,9 @@ public:
     // streamed pose is authoritative and no integration fights it. Game thread only.
     void Tick();
 
+    // Pushes the interpolated position and rotation to the engine actor.
+    void ApplyToEngine();
+
     // The interpolated class-specific visible-heading yaw (WorldActorPoseSnapshot.auxYaw).
     // Consumed by class lanes -- piramid_sync writes it to the heading ArrowComponents -- while
     // the generic ApplyToEngine ignores it. Valid once a pose arrived (hasPose()).
@@ -46,7 +49,7 @@ public:
     // piramid2_C it is relLook, the head's look target). NOT interpolated: it is a target the
     // mirror's own native easing consumes, so the latest wire value IS the truth.
     void CurrentAuxVec(float& x, float& y, float& z) const { x = auxX_; y = auxY_; z = auxZ_; }
-    // The latest class-specific TARGET-IDENTITY eid (WorldActorPoseSnapshot.auxTargetEid; for
+        // The latest class-specific TARGET-IDENTITY eid (WorldActorPoseSnapshot.auxTargetEid; for
     // piramid2_C the host's wispTarget as its npc-lane eid, 0 for none). Latest-wins like the aux
     // vec -- an identity has nothing to interpolate.
     uint32_t CurrentAuxTargetEid() const { return auxTargetEid_; }
@@ -66,16 +69,20 @@ public:
     // open concern once coins accumulate, and the fix for that is fairness in the walk -- a
     // rotating start -- not moving this call.
     bool PoseChangedSinceLastSend(const ue_wrap::FVector& loc, const ue_wrap::FRotator& rot);
+    bool AuxChangedSinceLastSend(float auxYaw, float auxX, float auxY, float auxZ, uint32_t auxTargetEid);
 
 private:
     // last transform actually batched (host send side; see PoseChangedSinceLastSend)
     bool  sentAny_    = false;
     float sentX_ = 0.f, sentY_ = 0.f, sentZ_ = 0.f;
     float sentPitch_ = 0.f, sentYaw_ = 0.f, sentRoll_ = 0.f;
+    bool     sentAuxAny_ = false;
+    float    sentAuxYaw_ = 0.f;
+    float    sentAuxX_ = 0.f, sentAuxY_ = 0.f, sentAuxZ_ = 0.f;
+    uint32_t sentAuxTargetEid_ = 0;
 
     void AdvanceInterp();   // advance the open window to now (mirrors Npc::AdvanceInterp)
-    void ApplyToEngine();   // SetActorLocation + SetActorRotation (FULL rotation; no CMC, no kerfur)
-
+    
     // Receiver-side interpolation state (game thread only; the engine path is single-threaded).
     ue_wrap::FVector curPos_{};
     float            curPitch_ = 0.f;

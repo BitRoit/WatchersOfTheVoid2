@@ -151,6 +151,10 @@ static_assert(kNpcAllowlist[kNpcAllowlistEagerSize - 1] == NpcClass_WispBlu &&
 // interceptor consumes this list, disjoint from kNpcAllowlist. Verified AActor/APawn in the CXX
 // header dump; matched by name and kept curated.
 inline constexpr const wchar_t* kWorldActorAllowlist[] = {
+    L"HoelUfo_C",                 // superFog's white lightning orb; native 0.9.0n asset
+    L"hoelUfoAttack_C",            // presentation-only host beam; native damage is never replayed
+    L"tentacleBallShot_C",         // presentation-only host beam; pointDamage zeroed on mirror
+    L"kavotiaShot_C",              // presentation-only host beam; pointDamage zeroed on mirror
     L"ufoDropper_body_C",          // ufoDropper delivery saucer body (the gray "drop pod")
     L"ufoDropper_car_C",           // ufoDropper car variant
     L"ufoDropper_tank_C",          // ufoDropper tank variant
@@ -323,6 +327,11 @@ inline constexpr const wchar_t* GetComponentForwardFn = L"GetForwardVector";
 // (Engine.hpp:17941/17950).
 inline constexpr const wchar_t* GetComponentRotationFn = L"K2_GetComponentRotation";
 inline constexpr const wchar_t* SetWorldRotationFn = L"K2_SetWorldRotation";
+inline constexpr const wchar_t* SetWorldLocationAndRotationFn = L"K2_SetWorldLocationAndRotation";
+// USceneComponent::SetAbsolute keeps selected transform axes in world space when the parent
+// moves. Remote-puppet flashlight presentation drives its light in world space, so it opts into
+// absolute location and rotation rather than letting the puppet capsule recompose the child.
+inline constexpr const wchar_t* SetAbsoluteFn = L"SetAbsolute";
 inline constexpr const wchar_t* SetRelativeScale3DFn = L"SetRelativeScale3D";
 inline constexpr const wchar_t* RelativeRotationProp = L"RelativeRotation";
 inline constexpr const wchar_t* RelativeScale3DProp = L"RelativeScale3D";
@@ -456,6 +465,7 @@ inline constexpr const wchar_t* MainPlayerFireInputEventFn58 = L"InpActEvt_fire_
 // receiver mirrors the sender's intensity on the puppet's light_R with it (the BP toggles
 // Intensity, not bVisible); it marks the render state dirty, which a direct field write does not.
 inline constexpr const wchar_t* SetIntensityFn      = L"SetIntensity";
+inline constexpr const wchar_t* SetCastShadowsFn    = L"SetCastShadows";
 
 // USpotLightComponent's cone-angle setters: both call MarkRenderStateDirty, so the receiver uses
 // them to mirror the sender's cone; a direct field write leaves the proxy stale.

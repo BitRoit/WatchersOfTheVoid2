@@ -16,6 +16,7 @@
 namespace coop::net {
 class Session;
 struct PyramidGatherPayload;
+struct PyramidGatherStatePayload;
 }
 
 namespace coop::piramid_sync {
@@ -73,6 +74,7 @@ void OnDisconnect();
 // npc lane's authoritative EntityDestroy: a client mirror is never in npc_sync's host reverse
 // map, so there is no echo, and whichever lands second sees "already not-live" and no-ops.
 void OnPyramidGather(const coop::net::PyramidGatherPayload& payload);
+void OnPyramidGatherState(const coop::net::PyramidGatherStatePayload& payload);
 
 // HOST pose augmentation (auxYaw, called by world_actor_sync::TickPoseStream per pyramid
 // entry, game thread): read the actor's VISIBLE heading -- the movementVector

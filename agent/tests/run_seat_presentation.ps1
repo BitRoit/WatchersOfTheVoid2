@@ -5,7 +5,16 @@ $output=Join-Path $checkout 'build/seat-presentation-check'
 New-Item -ItemType Directory -Force -Path $output | Out-Null
 Push-Location $checkout
 try {
- if(-not(Get-Command cl -ErrorAction SilentlyContinue)){. (Join-Path $checkout '../_toolchain/env.ps1')}
+ if(-not(Get-Command cl -ErrorAction SilentlyContinue)){
+  $legacy=Join-Path $checkout '../_toolchain/env.ps1'
+  if(Test-Path -LiteralPath $legacy){. $legacy}else{
+   $vsDev='C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\Common7\Tools\VsDevCmd.bat'
+   if(Test-Path -LiteralPath $vsDev){
+    $lines=& cmd.exe /d /s /c ('call "'+$vsDev+'" -arch=x64 -host_arch=x64 >nul && set')
+    foreach($line in $lines){if($line -match '^(.*?)=(.*)$'){Set-Item -Path ('Env:'+$matches[1]) -Value $matches[2]}}
+   }
+  }
+ }
  $wrapper=[IO.File]::ReadAllText((Join-Path $checkout 'src/votv-coop/src/ue_wrap/actors/sit_pose.cpp')).Replace("`r`n","`n")
  $controller=[IO.File]::ReadAllText((Join-Path $checkout 'src/votv-coop/src/coop/player/sit_pose.cpp')).Replace("`r`n","`n")
  $view=[IO.File]::ReadAllText((Join-Path $checkout 'src/votv-coop/src/coop/player/remote_player.cpp')).Replace("`r`n","`n")

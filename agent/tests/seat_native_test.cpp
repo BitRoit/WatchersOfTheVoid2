@@ -9,6 +9,7 @@
 #define SEAT_BODY_YAW_HEADER "coop/player/puppet_body_yaw.h"
 #endif
 #include SEAT_BODY_YAW_HEADER
+#include "ue_wrap/core/cached_obj_ref.h"
 #include <array>
 #include <cstdio>
 #include <cstdlib>
@@ -17,12 +18,12 @@
 #define CHECK(x) do{if(!(x)){std::fprintf(stderr,"FAIL %d: %s\n",__LINE__,#x);std::exit(1);}}while(0)
 namespace test {
 struct Obj {alignas(8)uint8_t memory[0x800]{};int id=0,serial=1;bool live=true;void* cls=nullptr;void* world=nullptr;
- uint8_t flags=0xa5;void* body=nullptr;void* vis=nullptr;void* component=nullptr;int kind=0,calls=0;
+ uint8_t flags=0xa5;void* body=nullptr;void* vis=nullptr;void* component=nullptr;void* lightComponent=nullptr;int kind=0,calls=0;
  ue_wrap::FVector relative{},location{};ue_wrap::FRotator rotation{};ue_wrap::reflection::FName name{1,0};}objects[120];
 void* animBase=&objects[110];void* relativeFunction=&objects[112];void* rotationFunction=&objects[113];
 uint32_t generation=1;uintptr_t worldToken=11;
 float half=88;bool callOk=true,rotationRead=true,baseLoaded=true;
-int failAt=0,totalCalls=0,lookCalls=0;float probeFacing=0;
+int failAt=0,totalCalls=0,lookCalls=0,lagPropertyLookups=0,lightPropertyLookups=0;float probeFacing=0;
 std::wstring missingParam;ue_wrap::FVector forward{1,0,0},look{};
 std::function<void()> onFrame,onCall,onBase,onParent,onHead,onBool;
 Obj& O(void* p){return *static_cast<Obj*>(p);}void At(std::function<void()>& f){auto copy=std::move(f);f={};if(copy)copy();}
@@ -33,10 +34,10 @@ void Reset(){
  for(int i=0;i<120;++i){int serial=objects[i].serial+1;objects[i]={};objects[i].id=i;objects[i].serial=serial;
   objects[i].cls=&objects[111];if(i<110)objects[i].world=reinterpret_cast<void*>(worldToken);}
  for(int i=0;i<32;++i)objects[i].body=&objects[32+i];
- objects[65].cls=&objects[110];Anim(&objects[32],&objects[65]);objects[0].component=&objects[68];
+ objects[65].cls=&objects[110];Anim(&objects[32],&objects[65]);objects[0].component=&objects[68];objects[0].lightComponent=&objects[69];
  objects[112].kind=0;objects[113].kind=1;objects[115].kind=0;objects[116].kind=1;
  animBase=&objects[110];relativeFunction=&objects[112];rotationFunction=&objects[113];
- half=88;callOk=rotationRead=baseLoaded=true;failAt=totalCalls=lookCalls=0;missingParam.clear();forward={1,0,0};look={};probeFacing=0;
+ half=88;callOk=rotationRead=baseLoaded=true;failAt=totalCalls=lookCalls=lagPropertyLookups=lightPropertyLookups=0;missingParam.clear();forward={1,0,0};look={};probeFacing=0;
  for(auto& entry:ue_wrap::sit_pose::g_shift)entry={};++ue_wrap::sit_pose::g_shiftRevision;
 }
 }
@@ -48,7 +49,11 @@ void* ObjectAt(int32_t i){return i>=0&&i<120?&test::objects[i]:nullptr;}
 void* ClassOf(void* p){return p?test::O(p).cls:nullptr;}
 bool IsDescendantOfAny(void* cls,void* const* bases,size_t count,int){for(size_t i=0;i<count;++i)if(cls==bases[i])return true;return false;}
 void* FindDispatchFunctionCached(void*,const wchar_t* n){return !wcscmp(n,L"K2_SetRelativeLocation")?test::relativeFunction:test::rotationFunction;}
-int32_t FindPropertyOffset(void*,const wchar_t* n){return !wcscmp(n,L"lag_fl")?offsetof(test::Obj,component):!wcscmp(n,L"sitarrow")?offsetof(test::Obj,component):-1;}
+int32_t FindPropertyOffset(void*,const wchar_t* n){
+ if(!wcscmp(n,L"lag_fl")){++test::lagPropertyLookups;return offsetof(test::Obj,component);}
+ if(!wcscmp(n,L"light_R")){++test::lightPropertyLookups;return offsetof(test::Obj,lightComponent);}
+ return !wcscmp(n,L"sitarrow")?offsetof(test::Obj,component):-1;
+}
 bool FindBoolProperty(void*,const wchar_t* n,int32_t& offset,uint8_t& mask){
  offset=offsetof(test::Obj,flags);mask=!wcscmp(n,L"isOnAtv")?2:4;test::At(test::onBool);return true;
 }
@@ -82,6 +87,10 @@ FVector GetActorForwardVector(void*){return test::forward;}
 FVector GetComponentRelativeLocation(void* p){auto base=test::O(p).relative;test::At(test::onBase);return base;}
 bool TryGetComponentWorldRotation(void* p,FRotator& r){r=test::O(p).rotation;test::At(test::onParent);return test::rotationRead;}
 bool TryGetActorRotation(void* p,FRotator& r){r=test::O(p).rotation;return true;}
+bool TryGetActorLocation(void* p,FVector& out){out=test::O(p).location;return true;}
+bool SetComponentWorldLocationAndRotation(void* p,const FVector& location,const FRotator& rotation){
+ test::O(p).location=location;test::O(p).rotation=rotation;return true;
+}
 namespace R=reflection;namespace P=profile;
 #include "seat_rotation.inc"
 }
@@ -89,6 +98,9 @@ namespace coop::puppet_head_probe {void Tick(void*,float body,float,float){test:
 namespace coop {
 class RemotePlayer {public:
  void* actor_=&test::objects[0];uint8_t curStateBits_=net::kStateBitSitting;
+ static constexpr int32_t kViewOffsetUnresolved=-2;
+ ue_wrap::CachedObjRef viewLayoutClass_;
+ int32_t lagFlOffset_=kViewOffsetUnresolved,lightROffset_=kViewOffsetUnresolved;
  ue_wrap::FRotator aim{10,90,0};
  bool valid()const{return actor_&&ue_wrap::reflection::IsLive(actor_);}
  #include "chair_sitting.inc"

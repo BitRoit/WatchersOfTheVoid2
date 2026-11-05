@@ -1,6 +1,6 @@
 // coop/interactables/atv_corrector.cpp -- see coop/interactables/atv_corrector.h. The corrector
 // for an ATV this peer does not author: a velocity bias between packets, a cut when the error
-// is too far to converge, and nothing at all while the author is parked.
+// is too far to converge, and coherent horizontal motion for an idle mirror.
 
 #include "coop/interactables/atv_corrector.h"
 
@@ -14,6 +14,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <algorithm>
 
 namespace coop::atv_corrector {
 
@@ -50,32 +51,23 @@ constexpr float kCorrGain     = 0.5f;
 // that was lying about whether convergence was possible.
 constexpr float kStallShrinkFrac  = 0.95f;  // "shrank" = at least 5% closer than last packet
 constexpr int   kStallWarpPackets = 5;      // 250 ms on the drive lane, 1 s on the idle one
-// At rest, do not touch it at all. On a parked ATV the author reports zero velocity and one
-// steady height while the mirror falls, free fall over about a second, comes to rest a few
-// tens of centimetres low and stays; cut back to the author's pose, it falls again within
-// half a second, every time. The only thing this lane does to a mirror between packets is
-// write its root's physics velocity, and writing a velocity wakes a settled body. This is not
-// the velocity test the stall arm rejects: that one asks whether a nudge can close a gap,
-// where the mirror's own velocity says nothing; this asks whether the author is moving, and
-// if it is not there is no velocity to mirror and the write is the only thing left that can
-// cause the fall. MTA's unoccupied-vehicle sync carries a sync-velocity bit set only when the
-// velocity is non-negligible, and the receiver writes the speed only under it; the divergence
-// is that they spend a wire bit and we test the received value, since our payload is
-// fixed-layout and a value cannot be lied about independently of its pose. Their threshold is
-// not ported (its units are established nowhere in the vendored tree); ours comes from our
-// logs: a parked author reports 0, a coasting one a few cm/s, a driven one hundreds.
+// Keep root-only vertical writes away from a settled constraint rig: they woke
+// the chassis independently of its wheels and repeatedly disturbed suspension.
+// This band is not a declaration that the mirror has stopped. Even below it an
+// unbraked author may coast; coherent planar motion is matched on all four roots.
 constexpr float kRestLinCmS  = 5.f;
 constexpr float kRestAngDegS = 5.f;
+constexpr uint64_t kRestPoseMs = 1000;
+constexpr uint64_t kRestPoseGapMs = 3000; // idle keepalive is 2 s; a longer silence proves nothing
+constexpr float kRestPoseCm = 5.f;
+constexpr float kRestPoseDeg = 3.f;
 // How many times a resting mirror is re-placed before admitting the pose lane cannot hold it:
 // three distinguishes settled from cannot-settle-here, and past that the difference is under
 // the vehicle, where saying so beats teleporting forever.
 constexpr int   kRestMaxReplaces = 3;
-// Within this long. A rest episode is a stretch of packets in which the author does not move,
-// and counting consecutive ones cannot bound it: a re-place puts the rig exactly on the
-// author's pose, so the next packet is the one most likely in band, which resets the count.
-// Bounded per episode the diagnostic is reached; bounded by consecutive packets, an error
-// re-crossing the deadband every other packet would teleport forever without it.
-constexpr uint64_t kRestEpisodeMs = 10000;
+// A rest episode ends on actual author movement/ownership change, never elapsed
+// wall time. A time-based reset made a stationary rig teleport three more times
+// every ten seconds for the entire session.
 
 constexpr uint64_t kCorrMinDtMs = 20;    // a burst must not manufacture a huge corrective velocity
 constexpr uint64_t kCorrMaxDtMs = 1000;  // a long gap must not manufacture a vanishing one
@@ -121,9 +113,24 @@ void WriteMirrorVelocity(void* actor, const FVector& lin, const FVector& ang, bo
 
 void LogWire(const char* what, const AtvEntry& e, float dist,
              const FVector& wireLin, const FVector& cur, const FVector& wirePos) {
-    UE_LOGI("[ATVC] %s dist=%.1f cur.z=%.1f wire.z=%.1f wireLin=(%.1f,%.1f,%.1f) |v|=%.1f "
-            "stall=%d", what, dist, cur.Z, wirePos.Z,
+    UE_LOGI("[ATVC] %s key='%ls' dist=%.1f cur.z=%.1f wire.z=%.1f wireLin=(%.1f,%.1f,%.1f) |v|=%.1f "
+            "stall=%d", what, A::GetKeyString(e.actor).c_str(), dist, cur.Z, wirePos.Z,
             wireLin.X, wireLin.Y, wireLin.Z, Len(wireLin), e.stallPackets);
+}
+
+bool MatchIdlePlanar(AtvEntry& e,const coop::net::AtvStatePayload& p,const FVector& desired,uint64_t now) {
+    const bool logDue=now-e.lastPlanarCorrectionLogMs>=5000;
+    if(logDue)e.lastPlanarCorrectionLogMs=now;
+    const std::wstring key=logDue?A::GetKeyString(e.actor):std::wstring{};
+    FVector before{};int writes=0;
+    const bool ok=A::MatchRigPlanarVelocity(e.actor,desired,before,writes);
+    if(logDue){
+        UE_LOGI("[ATVC] PLANAR key='%ls' ok=%d writes=%d brake=%d mirror=(%.2f,%.2f,%.2f) desired=(%.2f,%.2f) wire=(%.2f,%.2f,%.2f)",
+            key.c_str(),ok,writes,(p.stateBits&coop::net::kAtvStateBitBrake)!=0,
+            before.X,before.Y,before.Z,desired.X,desired.Y,p.linVelX,p.linVelY,p.linVelZ);
+    }
+    if(ok&&writes)++g_corrs;
+    return ok;
 }
 
 }  // namespace
@@ -165,13 +172,68 @@ void ApplyCorrection(AtvEntry& e, const coop::net::AtvStatePayload& p, bool snap
     const float dRoll  = std::fabs(ue_wrap::NormalizeAxis(wireRot.Roll  - curRot.Roll));
 
     // The two gates, computed once and read by every write site below.
-    const bool linAtRest = Len(wireLin) <= kRestLinCmS;
-    const bool angAtRest = Len(wireAng) <= kRestAngDegS;
-
+    // A grav-hand can hold the authority still in mid-air. Its mirror has no
+    // matching hand constraint, so it still needs velocity/position correction
+    // against gravity. Treating it as parked spends three re-places and then
+    // leaves it on the floor. The already-authorized grab bit distinguishes it
+    // from an ordinary settled rig, whose no-linear-write protection stays intact.
+    const bool carried = (p.stateBits & coop::net::kAtvStateBitGrabbed) != 0;
     const uint64_t now = NowMs();
+    // A parked native suspension can report root speeds above the rest band while
+    // its pose only rocks a few centimetres. Writing those speeds wakes the mirror
+    // and restarts its fall. Confirm rest against a FIXED wire-pose anchor, never
+    // against the mirror or only the preceding packet (slow travel accumulates).
+    // A driver, grabber, adoption or receive gap invalidates that observation.
+    const bool idle = !carried && p.occupantSlot == 0xFF;
+    const bool newAuthority = e.restAnchorSyncer != p.syncerSlot;
+    const FVector anchorDelta{wirePos.X-e.restAnchorPos.X,wirePos.Y-e.restAnchorPos.Y,wirePos.Z-e.restAnchorPos.Z};
+    const bool withinAnchor = Len(anchorDelta) <= kRestPoseCm &&
+        std::fabs(ue_wrap::NormalizeAxis(wireRot.Pitch-e.restAnchorRot.Pitch)) <= kRestPoseDeg &&
+        std::fabs(ue_wrap::NormalizeAxis(wireRot.Yaw-e.restAnchorRot.Yaw)) <= kRestPoseDeg &&
+        std::fabs(ue_wrap::NormalizeAxis(wireRot.Roll-e.restAnchorRot.Roll)) <= kRestPoseDeg;
+    if(e.restAnchorSinceMs && !withinAnchor) e.restReplaces = 0;
+    if (!idle || snap || !e.lastPktMs || newAuthority) e.restReplaces = 0;
+    if (idle  || snap || !e.lastPktMs || newAuthority) e.seatedReplaces = 0;
+    if (!idle || snap || !e.lastPktMs || now - e.lastPktMs > kRestPoseGapMs || newAuthority)
+        e.restAnchorSinceMs = 0;
+    e.restAnchorSyncer = p.syncerSlot;
+    bool poseAtRest = false;
+    if (idle) {
+        const bool within = e.restAnchorSinceMs && withinAnchor;
+        if (!within) {
+            // A packet gap invalidates confidence but does not grant another
+            // parked teleport budget. Only displacement/rotation of an existing
+            // authority anchor does that.
+            if(e.restAnchorSinceMs) e.restReplaces = 0;
+            e.restAnchorPos = wirePos;
+            e.restAnchorRot = wireRot;
+            e.restAnchorSinceMs = now;
+        } else poseAtRest = now - e.restAnchorSinceMs >= kRestPoseMs;
+    }
+    const bool linAtRest = !carried && (Len(wireLin) <= kRestLinCmS || poseAtRest);
+    const bool angAtRest = Len(wireAng) <= kRestAngDegS || poseAtRest;
+    if(now-e.lastCorrectionDecisionMs >= 5000) {
+        e.lastCorrectionDecisionMs=now;
+        const FVector d{wirePos.X-e.restAnchorPos.X,wirePos.Y-e.restAnchorPos.Y,wirePos.Z-e.restAnchorPos.Z};
+        UE_LOGI("[ATVC] DECISION key='%ls' mode=%s source=%u seat=%u grabbed=%d speed=%.1f angular=%.1f anchorAge=%llu anchorDelta=%.1f error=%.1f places=%d cur=(%.1f,%.1f,%.1f) wire=(%.1f,%.1f,%.1f)",
+            A::GetKeyString(e.actor).c_str(),poseAtRest?"RESTPOSE":linAtRest&&angAtRest?"RESTVEL":"MOVING",
+            static_cast<unsigned>(p.syncerSlot),static_cast<unsigned>(p.occupantSlot),carried,
+            Len(wireLin),Len(wireAng),static_cast<unsigned long long>(e.restAnchorSinceMs?now-e.restAnchorSinceMs:0),Len(d),dist,idle ? e.restReplaces : e.seatedReplaces,
+            cur.X,cur.Y,cur.Z,wirePos.X,wirePos.Y,wirePos.Z);
+    }
+
     const uint64_t rawDt = e.lastPktMs ? (now - e.lastPktMs) : kCorrMaxDtMs;
     const uint64_t dtMs = rawDt < kCorrMinDtMs ? kCorrMinDtMs
                                                : (rawDt > kCorrMaxDtMs ? kCorrMaxDtMs : rawDt);
+    const bool haveMotionSample=e.haveCorrectionWirePos&&e.lastPktMs&&rawDt>0&&rawDt<=kRestPoseGapMs&&!snap&&!newAuthority;
+    FVector idleMotion=wireLin;
+    if(poseAtRest&&haveMotionSample){
+        // A stable pose can coexist with suspension speed spikes. Actual planar
+        // travel also preserves an unbraked 1cm/s coast below the old rest gate.
+        idleMotion.X=(wirePos.X-e.lastCorrectionWirePos.X)*1000.f/static_cast<float>(rawDt);
+        idleMotion.Y=(wirePos.Y-e.lastCorrectionWirePos.Y)*1000.f/static_cast<float>(rawDt);
+    }
+    e.lastCorrectionWirePos=wirePos;e.haveCorrectionWirePos=true;
     e.lastPktMs = now;
 
     // Every test is inverted on purpose, MTA's own idiom: a comparison against NaN is false, so
@@ -184,49 +246,54 @@ void ApplyCorrection(AtvEntry& e, const coop::net::AtvStatePayload& p, bool snap
         // update), do not write the authority's velocity onto a body still in the wrong place; that
         // accelerates the error. Logged after the teleport succeeds; an instrument reporting an
         // action it did not take is worse than none.
-        if (!A::TeleportRig(e.actor, wirePos, wireRot)) return;
+        if (!A::TeleportRigPreservingShape(e.actor, wirePos, wireRot)) return;
         LogWire("WARP", e, dist, wireLin, cur, wirePos);
-        WriteMirrorVelocity(e.actor, wireLin, wireAng, linAtRest);
+        if(idle&&linAtRest&&angAtRest)MatchIdlePlanar(e,p,idleMotion,now);
+        else WriteMirrorVelocity(e.actor, wireLin, wireAng, linAtRest);
         ++g_warps;
         return;
     }
 
-    // The author is parked: mirror its pose, never its velocity, then leave the rig alone. Falling
-    // through would write a zero velocity onto a settled body every packet, the measured cause of
-    // the fall.
+    // A low wire speed does not mean the mirror has stopped. Pose-only replaces
+    // retained its horizontal momentum and rolled away again (fresh 9F730A logs).
+    // Correct common planar motion across ALL native roots, preserving each Z
+    // velocity, relative suspension motion, angular velocity and actual brake bit.
     if (linAtRest && angAtRest) {
         e.stallPackets = 0;
         e.lastErrCm    = -1.f;
-        if (dist <= kCorrDeadbandCm) return;  // in band and nobody moving it: touch nothing. The episode counter is not cleared here, since landing in band is the expected result of a re-place
-        if (now - e.lastRestPlaceMs > kRestEpisodeMs) e.restReplaces = 0;  // a new episode
+        const FVector idleBaseMotion=idleMotion;
+        const float planarError=std::sqrt(err.X*err.X+err.Y*err.Y);
+        if(idle&&planarError>kCorrDeadbandCm){
+            // Idle packets may be 2s apart. Use that real interval rather than
+            // the moving-lane 1s cap, which would overshoot the correction.
+            const float interval=static_cast<float>(std::max(kCorrMinDtMs,std::min(rawDt,kRestPoseGapMs)));
+            const float gain=kCorrGain*1000.f/interval;
+            const FVector corr=ClampVelocity({err.X*gain,err.Y*gain,0},kCorrMaxCmS);
+            idleMotion.X+=corr.X;idleMotion.Y+=corr.Y;
+        }
+        if(idle&&!MatchIdlePlanar(e,p,idleMotion,now))return;
+        // Horizontal error converges through velocity; teleporting for it creates
+        // a visible snap. Retain the bounded vertical recovery independently.
+        if ((idle?std::fabs(err.Z):dist) <= kCorrDeadbandCm) return;
+        int& replaces = idle ? e.restReplaces : e.seatedReplaces;
         if (e.restReplaces >= kRestMaxReplaces) return;   // already said our piece, below
-        ++e.restReplaces;
+        if (replaces >= kRestMaxReplaces) return;
+        if (!A::TeleportRigPreservingShape(e.actor, wirePos, wireRot)) return;
+        if(idle&&!MatchIdlePlanar(e,p,idleBaseMotion,now))return; // completed placement no longer needs position bias
+        ++replaces;
         e.lastRestPlaceMs = now;
-        if (!A::TeleportRig(e.actor, wirePos, wireRot)) return;
         ++g_restPlaces;
-        // No velocity write after the teleport. The two cut paths write one immediately after the
-        // teleport, so the rig was never once put down and left to rest, and fell-back-because-the-
-        // worlds-differ could not be told from fell-back-because-we-pushed-it. This branch is the
-        // experiment as well as the fix.
-        if (e.restReplaces >= kRestMaxReplaces) {
-            // The line names the class, not a subsystem, and points at the cheapest discriminator
-            // first: ride height, the body's Z above the mean of its own rig bodies in the probe
-            // line, separates a rig of the wrong shape (ours, always; the last case was our own
-            // collision guard cancelling the wheel hit delegates and taking the rig's shape with
-            // them) from a rig in the wrong place (possibly the world's). A pose lane can only ever
-            // fix the second, and a verdict that points outward when the cause is ours sends the
-            // next session to measure the world.
-            UE_LOGW("atv: a parked mirror would not stay on the authority's pose after %d "
-                    "re-places (last error %.1f cm). CHECK THE RIG'S SHAPE BEFORE THE WORLD: "
-                    "compare rideH in [ATVP] on both peers ([dev] atv_probe=1). If they differ, "
-                    "the mirror is DEFORMED and no pose correction can fix it -- last time that "
-                    "was our own collision guard. Only if the shapes agree is this about the "
-                    "world (terrain, or a hook coupling the rig to a prop the author cannot see)",
-                    kRestMaxReplaces, dist);
+        // Keep recovery bounded even if the peers' vertical contacts disagree.
+        if (replaces >= kRestMaxReplaces) {
+            UE_LOGW("atv: %s mirror key='%ls' still has vertical mismatch after %d re-places "
+                    "(before-place dz=%.1f cm). Compare [ATVR] geometry and [ATVC] PLANAR motion on both peers.",
+                    idle ? "idle" : "seated", A::GetKeyString(e.actor).c_str(), kRestMaxReplaces, err.Z);
         }
         return;
+    } else {
+        e.restReplaces   = 0;
+        e.seatedReplaces = 0;
     }
-    if (!linAtRest) e.restReplaces = 0;   // the episode ended because the author moved
 
     // Is the correction working? Count packets where the error stayed outside the deadband and
     // refused to shrink; past the limit, cut instead of nudging.
@@ -241,7 +308,7 @@ void ApplyCorrection(AtvEntry& e, const coop::net::AtvStatePayload& p, bool snap
     if (e.stallPackets >= kStallWarpPackets) {
         e.stallPackets = 0;
         e.lastErrCm = -1.f;
-        if (!A::TeleportRig(e.actor, wirePos, wireRot)) return;
+        if (!A::TeleportRigPreservingShape(e.actor, wirePos, wireRot)) return;
         LogWire("CUT", e, dist, wireLin, cur, wirePos);
         WriteMirrorVelocity(e.actor, wireLin, wireAng, linAtRest);
         ++g_stallWarps;

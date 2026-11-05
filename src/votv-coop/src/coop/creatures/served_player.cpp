@@ -5,6 +5,11 @@
 #include "coop/net/session.h"
 #include "coop/player/players_registry.h"
 #include "coop/player/remote_player.h"
+#include "coop/element/mirror_managers.h"
+#include "coop/element/npc.h"
+#include "ue_wrap/actors/vitals.h"
+#include "ue_wrap/engine/engine.h"
+#include "ue_wrap/engine/world_identity.h"
 
 #include "ue_wrap/actors/kerfur.h"
 #include "ue_wrap/core/game_thread.h"
@@ -16,8 +21,11 @@
 #include "ue_wrap/facts/function_row.h"
 
 #include <atomic>
+#include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <unordered_map>
+#include <vector>
 
 namespace coop::served_player {
 namespace {
@@ -212,6 +220,68 @@ void UpdateArm() {
     ArmSeam(g_gpp, (want & kPlayerPawn) != 0);
 }
 
+// These exact native graphs use player-0 for player approach/alert decisions.
+// Keep their timers/pathfinding intact; only answer those player reads for the
+// preferred living peer. Personal encounters and command-owned robots stay out.
+uint64_t g_nextTargetMs = 0;
+uint64_t TargetNowMs() {
+    return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count());
+}
+void UpdateCreatureTargets() {
+    if (!OnHost()) return;
+    auto* session = g_session.load();
+    if (!session->connected()) return;
+    const auto now = TargetNowMs();
+    if (now < g_nextTargetMs) return;
+    g_nextTargetMs = now + 100;
+    void* world = ue_wrap::world_identity::CurrentWorld();
+    if (!world) return;
+    struct Candidate { uint8_t slot; ue_wrap::FVector position; };
+    Candidate candidates[coop::players::kMaxPeers]; size_t count = 0;
+    auto add = [&](uint8_t slot, void* pawn) {
+        ue_wrap::FVector pos{};
+        if (!pawn || !R::IsLive(pawn) || ue_wrap::world_identity::WorldOf(pawn) != world ||
+            !ue_wrap::engine::TryGetActorLocation(pawn, pos) ||
+            !std::isfinite(pos.X) || !std::isfinite(pos.Y) || !std::isfinite(pos.Z)) return;
+        candidates[count++] = Candidate{slot, pos};
+    };
+    auto& players = coop::players::Registry::Get();
+    float dead = 1;
+    if (ue_wrap::vitals::Read(ue_wrap::vitals::Field::Dead, &dead) && dead == 0)
+        add(coop::players::kPeerIdHost, players.Local());
+    for (uint8_t slot = 1; slot < coop::players::kMaxPeers; ++slot) {
+        if (!session->IsSlotConnected(slot) || !session->IsSlotReady(slot) || !session->IsSlotWorldReady(slot)) continue;
+        auto* peer = players.Puppet(slot);
+        if (peer && peer->valid() && peer->HasPose() && std::isfinite(peer->GetHealth()) && peer->GetHealth() > 0)
+            add(slot, peer->GetActor());
+    }
+    static std::vector<coop::element::Npc*> npcs;
+    coop::element::NpcMirrors().Snapshot(npcs);
+    for (auto* npc : npcs) {
+        void* actor = npc && !npc->IsMirror() ? npc->LiveActor() : nullptr;
+        if (!actor || ue_wrap::world_identity::WorldOf(actor) != world) continue;
+        const auto& cls = R::NameOf(R::ClassOf(actor));
+        if (!R::NameEquals(cls, L"kavotia_C") && !R::NameEquals(cls, L"tentacleBall_C") &&
+            !R::NameEquals(cls, L"antibreather_C")) continue;
+        ue_wrap::FVector pos{};
+        if (!ue_wrap::engine::TryGetActorLocation(actor, pos)) continue;
+        float best = INFINITY, previous = INFINITY; uint8_t chosen = 0;
+        const auto old = ServedSlot(actor);
+        for (size_t i = 0; i < count; ++i) {
+            const auto& p = candidates[i].position;
+            const float dx=pos.X-p.X, dy=pos.Y-p.Y, dz=pos.Z-p.Z;
+            const float distance = std::sqrt(dx*dx+dy*dy+dz*dz);
+            if (candidates[i].slot == old) previous = distance;
+            if (distance < best) { best = distance; chosen = candidates[i].slot; }
+        }
+        // A small distance tie must not switch the approached player each tick.
+        if (std::isfinite(previous) && previous <= best * 1.1f + 250.f) chosen = old;
+        if (!count) Unserve(actor);
+        else Serve(actor, chosen, kPlayerPawn | kPlayerCharacter);
+    }
+}
+
 }  // namespace
 
 void Install(coop::net::Session* session) {
@@ -256,6 +326,7 @@ uint8_t ServedSlot(void* robot) {
 }
 
 void Tick() {
+    UpdateCreatureTargets();
     if (g_records.empty() && !g_mainWatched && !g_gpc.armed && !g_gpp.armed) return;
     for (auto it = g_records.begin(); it != g_records.end();) {
         if (!R::IsLiveByIndex(it->first, it->second.idx)) it = g_records.erase(it);
@@ -274,6 +345,7 @@ void OnPeerLeft(uint8_t slot) {
 }
 
 void OnDisconnect() {
+    g_nextTargetMs = 0;
     if (g_answered)
         UE_LOGI("served_player: session end -- %llu player-0 reads answered with a served client", g_answered);
     g_records.clear();

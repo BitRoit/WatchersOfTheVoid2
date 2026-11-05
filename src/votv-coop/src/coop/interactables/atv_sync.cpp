@@ -229,8 +229,14 @@ void EnsureHonkWatch() {
     const auto now = std::chrono::steady_clock::now();
     if (now < nextTry) return;
     nextTry = now + std::chrono::seconds(1);
-    if (!honk) honk = ue_wrap::script_gate::WatchClassName(
-        L"ATV_C", L"InpActEvt_atv_honk_K2Node_InputActionEvent", 0x4154484B, &OnHonkPre, nullptr);
+    if (!honk) {
+        honk = ue_wrap::script_gate::WatchClassName(
+            L"ATV_C", L"InpActEvt_atv_honk_K2Node_InputActionEvent_14", 0x4154484B, &OnHonkPre, nullptr);
+        if (!honk) {
+            honk = ue_wrap::script_gate::WatchClassName(
+                L"ATV_C", L"InpActEvt_atv_honk_K2Node_InputActionEvent", 0x4154484B, &OnHonkPre, nullptr);
+        }
+    }
     if (!mount) mount = ue_wrap::script_gate::WatchClassName(
         L"ATV_C", L"actionName", 0x41544D54, &OnMountPre, nullptr);
     ue_wrap::script_gate::ResolvePendingNames();
@@ -788,7 +794,7 @@ void Tick() {
             // A client syncer streams at the drive rate whether it sits, carries or has only not been handed
             // back yet; the host streams at it while its own player drives or carries. The ATV health drill's
             // silent arm holds a client's block back (SetDrillMute).
-            if (!(g_drillMute && !isHost) && nowMs - e.lastSentMs >= kDriveSendMs) {
+            if (!(g_drillMute && !isHost) && (nowMs - e.lastSentMs >= kDriveSendMs || e.honkPulse)) {
                 e.lastSentMs = nowMs;
                 coop::net::AtvStatePayload p{};
                 const uint8_t occ = isHost ? e.occupantSlot : uint8_t{0xFF};   // the host stamps; a client's is overwritten

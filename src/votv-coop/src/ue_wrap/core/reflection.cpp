@@ -542,9 +542,37 @@ void* FindObjectByClass(const wchar_t* className) {
 
 void* FindClassDefaultObject(const wchar_t* className) {
     if (!className) return nullptr;
+    static std::mutex s_cdoCacheMu;
+    static std::unordered_map<uint64_t, CachedClass> s_cdoCache;
+    const uint64_t hash = Fnv1a(className);
+    void* raw = nullptr;
+    {
+        std::lock_guard<std::mutex> lk(s_cdoCacheMu);
+        auto it = s_cdoCache.find(hash);
+        if (it != s_cdoCache.end() && it->second.name == className) {
+            raw = it->second.cls.Raw();
+        }
+    }
+    if (raw) {
+        ue_wrap::CachedObjRef ref;
+        {
+            std::lock_guard<std::mutex> lk(s_cdoCacheMu);
+            auto it = s_cdoCache.find(hash);
+            if (it != s_cdoCache.end()) ref = it->second.cls;
+        }
+        void* live = ref.Get();
+        if (live) return live;
+    }
     std::wstring defName = L"Default__";
     defName += className;
-    return FindObject(defName.c_str());
+    void* cdo = FindObject(defName.c_str());
+    if (cdo) {
+        std::lock_guard<std::mutex> lk(s_cdoCacheMu);
+        auto& e = s_cdoCache[hash];
+        e.name = className;
+        e.cls.Set(cdo);
+    }
+    return cdo;
 }
 
 std::vector<ObjectRef> ChildObjectsOf(void* outer) {

@@ -69,6 +69,25 @@ bool WorldActor::PoseChangedSinceLastSend(const ue_wrap::FVector& loc, const ue_
     return true;
 }
 
+bool WorldActor::AuxChangedSinceLastSend(float auxYaw, float auxX, float auxY, float auxZ, uint32_t auxTargetEid) {
+    constexpr float kRotEps = 0.25f;
+    constexpr float kLocEps = 0.5f;
+    const float y = ue_wrap::NormalizeAxis(auxYaw);
+    const bool changed =
+        !sentAuxAny_ ||
+        std::fabs(ue_wrap::NormalizeAxis(y - sentAuxYaw_)) > kRotEps ||
+        std::fabs(auxX - sentAuxX_) > kLocEps ||
+        std::fabs(auxY - sentAuxY_) > kLocEps ||
+        std::fabs(auxZ - sentAuxZ_) > kLocEps ||
+        auxTargetEid != sentAuxTargetEid_;
+    if (!changed) return false;
+    sentAuxAny_ = true;
+    sentAuxYaw_ = y;
+    sentAuxX_ = auxX; sentAuxY_ = auxY; sentAuxZ_ = auxZ;
+    sentAuxTargetEid_ = auxTargetEid;
+    return true;
+}
+
 void WorldActor::SetTargetPose(const coop::net::WorldActorPoseSnapshot& snap) {
     // The aux target vector and the target identity are latest-wins with no interp: the mirror's
     // native easing and branch selection consume them.

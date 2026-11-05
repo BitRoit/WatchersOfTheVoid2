@@ -16,6 +16,7 @@
 #include "coop/player/players_registry.h"  // kPeerIdUnknown
 #include "coop/player/puppet_footsteps.h"
 #include "coop/player/remote_player_ragdoll.h"
+#include "ue_wrap/core/cached_obj_ref.h"
 #include "ue_wrap/core/types.h"
 
 #include <cstdint>
@@ -195,6 +196,15 @@ private:
     // index from the object's own memory and passes on that impostor, and ApplyToEngine then
     // dereferences it at mainPlayer_C offsets. -1 means no puppet.
     int32_t internalIdx_ = -1;
+
+    // RefreshView runs on every remote-puppet presentation tick. The two flashlight fields are
+    // immutable for a live mainPlayer class, so retain successful offsets by its slot/serial
+    // identity. A missing field stays unresolved and is retried: a partially linked Blueprint
+    // class must not permanently lose its flashlight.
+    static constexpr int32_t kViewOffsetUnresolved = -2;
+    ue_wrap::CachedObjRef viewLayoutClass_;
+    int32_t lagFlOffset_ = kViewOffsetUnresolved;
+    int32_t lightROffset_ = kViewOffsetUnresolved;
 
     // The puppet actor sits at the wire pose with no offset: both ends are mainPlayer_C, so their
     // settled component chains are identical by class. Spawn logs the live chain as a drift

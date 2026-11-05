@@ -342,11 +342,14 @@ void Tick() {
     g_next = now+250;
     if (Client()) {
         g_pending.Prune(now);
-        const auto pending=g_pending.Rows(); // callbacks may replace/clear canonical rows
-        ResolvePass pass;
-        for (const auto& row : pending) {
-            if (!pass.Current()) return;
-            Paint(row.p,pass);
+        if (g_pending.HasDirty()) {
+            const auto pending=g_pending.Rows(); // callbacks may replace/clear canonical rows
+            ResolvePass pass;
+            for (const auto& row : pending) {
+                if (!row.dirty) continue;
+                if (!pass.Current()) return;
+                if (Paint(row.p, pass)) g_pending.MarkApplied(row.p);
+            }
         }
     } else {
         for (auto it = g_sent.begin(); it != g_sent.end();)

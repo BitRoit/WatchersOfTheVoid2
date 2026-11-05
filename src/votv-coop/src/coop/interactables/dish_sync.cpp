@@ -77,6 +77,9 @@ bool g_shadowMoving[coop::net::kMaxDishes] = {};
 // Dishes whose cues the mirror edges touched; the 1 Hz cue reconciler probes only these (the
 // pending-latent cue leak class).
 uint32_t g_cueWatch = 0;
+// The single currently playing audio dish on the client (-1 = none). Limiting to at most ONE
+// closest moving dish within proximity prevents the deafening 24-dish phase sum ("earrape").
+int32_t g_activeAudioDish = -1;
 // The park latch: the parked ticker instance (a fresh instance re-parks).
 void* g_parkedDisher = nullptr;
 
@@ -99,6 +102,10 @@ void ResetModuleState() {
     g_havePrevMovingHost = false;
     g_settleLeft = 0;
     std::memset(g_shadowMoving, 0, sizeof(g_shadowMoving));
+    if (g_activeAudioDish >= 0 && g_activeAudioDish < coop::net::kMaxDishes) {
+        D::DeactivateCues(g_activeAudioDish);
+    }
+    g_activeAudioDish = -1;
     g_cueWatch = 0;
     g_parkedDisher = nullptr;
     for (int32_t i = 0; i < coop::net::kMaxDishes; ++i) {
@@ -147,6 +154,78 @@ void AdvanceDishInterp() {
     for (int32_t i = 0; i < coop::net::kMaxDishes; ++i) AdvanceDishInterpSingle(i, now);
 }
 
+// Audio proximity limits: audible within 150m (15,000 units), with an 180m (18,000 units)
+// exit threshold to prevent boundary chatter.
+// At the base (where closest dishes Charlie/Foxtrot/India/Lima are at distance ~200m / 20,000 units),
+// zero dishes play audio, preventing the deafening 24-dish concurrent clipping ("earrape")
+// while preserving authentic localized dish servo sounds when a player is out near a dish.
+constexpr float kAudioEnterDist = 15000.f;  // 150 m
+constexpr float kAudioExitDist  = 18000.f;  // 180 m
+constexpr float kAudioEnterDistSq = kAudioEnterDist * kAudioEnterDist;
+constexpr float kAudioExitDistSq  = kAudioExitDist * kAudioExitDist;
+
+void UpdateClientDishAudio() {
+    const ue_wrap::FVector camLoc = ue_wrap::engine::GetCameraLocation();
+    if (camLoc.X == 0.f && camLoc.Y == 0.f && camLoc.Z == 0.f) return;
+
+    int32_t bestIdx = -1;
+    float bestDistSq = kAudioEnterDistSq;
+
+    // Hysteresis: if the current active dish is still moving, keep it active up to kAudioExitDist.
+    if (g_activeAudioDish >= 0 && g_activeAudioDish < coop::net::kMaxDishes) {
+        if (g_shadowMoving[g_activeAudioDish]) {
+            void* d = D::DishByIndex(g_activeAudioDish);
+            ue_wrap::FVector dishLoc;
+            if (d && ue_wrap::engine::TryGetActorLocation(d, dishLoc)) {
+                const float dx = dishLoc.X - camLoc.X;
+                const float dy = dishLoc.Y - camLoc.Y;
+                const float dz = dishLoc.Z - camLoc.Z;
+                const float distSq = dx * dx + dy * dy + dz * dz;
+                if (distSq <= kAudioExitDistSq) {
+                    bestIdx = g_activeAudioDish;
+                    bestDistSq = distSq;
+                }
+            }
+        }
+    }
+
+    // Check all moving dishes to find the closest one within range.
+    for (int32_t i = 0; i < coop::net::kMaxDishes; ++i) {
+        if (!g_shadowMoving[i]) continue;
+        void* d = D::DishByIndex(i);
+        if (!d) continue;
+
+        ue_wrap::FVector dishLoc;
+        if (!ue_wrap::engine::TryGetActorLocation(d, dishLoc)) continue;
+
+        const float dx = dishLoc.X - camLoc.X;
+        const float dy = dishLoc.Y - camLoc.Y;
+        const float dz = dishLoc.Z - camLoc.Z;
+        const float distSq = dx * dx + dy * dy + dz * dz;
+
+        if (distSq < bestDistSq) {
+            bestDistSq = distSq;
+            bestIdx = i;
+        }
+    }
+
+    if (bestIdx != g_activeAudioDish) {
+        if (g_activeAudioDish >= 0 && g_activeAudioDish < coop::net::kMaxDishes) {
+            D::DeactivateCues(g_activeAudioDish);
+            UE_LOGI("[dish] %d '%ls' audio cue deactivated",
+                    g_activeAudioDish, D::TechName(g_activeAudioDish).c_str());
+        }
+        g_activeAudioDish = bestIdx;
+        if (g_activeAudioDish >= 0) {
+            D::ActivateMoveCue(g_activeAudioDish);
+            g_cueWatch |= (1u << g_activeAudioDish);
+            UE_LOGI("[dish] %d '%ls' audio cue activated (dist=%.1f m)",
+                    g_activeAudioDish, D::TechName(g_activeAudioDish).c_str(),
+                    std::sqrt(bestDistSq) * 0.01f);
+        }
+    }
+}
+
 // The one row applier (stream rows and snapshot rows): the shadow, the raw moving flag, the
 // active dish, the cue edges, then the target, the interpolation or the snap. Game thread
 // only.
@@ -157,12 +236,13 @@ void ApplyDishRow(int32_t index, bool isMoving, float yawZ, float rollY, bool sn
     D::WriteIsMoving(index, isMoving);
     D::WriteActiveDish(index, isMoving);
     if (isMoving && !wasShadow) {
-        D::ActivateMoveCue(index);
-        g_cueWatch |= (1u << index);
         UE_LOGI("[dish] %d '%ls' mirror slew START (yaw=%.1f roll=%.1f)",
                 index, D::TechName(index).c_str(), yawZ, rollY);
     } else if (!isMoving && wasShadow) {
-        D::DeactivateCues(index);
+        if (index == g_activeAudioDish) {
+            D::DeactivateCues(index);
+            g_activeAudioDish = -1;
+        }
         UE_LOGI("[dish] %d '%ls' mirror slew STOP (yaw=%.1f roll=%.1f)",
                 index, D::TechName(index).c_str(), yawZ, rollY);
     }
@@ -284,7 +364,7 @@ void ClientParkLatch() {
         const auto& r = rows[i];
         if (r.index < 0 || r.index >= coop::net::kMaxDishes) continue;
         if (!(g_cueWatch & (1u << r.index))) continue;
-        if (r.isMoving || g_shadowMoving[r.index]) continue;  // legitimately audible
+        if (r.index == g_activeAudioDish && (r.isMoving || g_shadowMoving[r.index])) continue;  // legitimately audible
         bool ok = false;
         if (D::AnyCueActive(r.index, ok) && ok) {
             D::DeactivateCues(r.index);
@@ -330,6 +410,9 @@ void Tick() {
 
         // Drive the mirror pose interpolation unconditionally every frame.
         AdvanceDishInterp();
+
+        // Manage audio proximity: at most 1 closest moving dish within range plays audio on the client.
+        UpdateClientDishAudio();
 
         // The diagnostic probe log (one aggregate line at most once a second while any dish is
         // moving or interpolating).
@@ -390,6 +473,7 @@ void SettleForArm() {
     }
     if (cleared > 0)
         UE_LOGW("dish_sync: the arm settled %d mirrored mover(s) still moving -- a gate-bypass arm?", cleared);
+    g_activeAudioDish = -1;
 }
 
 void OnDishSnapshot(const coop::net::DishSnapshotPayload& p) {
@@ -460,6 +544,10 @@ void OnDisconnect() {
         // through this fan-out). Re-look-up instead of trusting the parked pointer: the instance
         // getters run the live-checked cache, so a ticker destroyed in the session-end race
         // declines instead of dispatching into freed memory.
+        if (g_activeAudioDish >= 0 && g_activeAudioDish < coop::net::kMaxDishes) {
+            D::DeactivateCues(g_activeAudioDish);
+        }
+        g_activeAudioDish = -1;
         if (g_parkedDisher) {
             if (void* d = D::DisherInstance()) {
                 if (D::RestoreDisher(d))

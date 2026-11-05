@@ -146,9 +146,17 @@ coop::element::ElementId EnrollUntrackedNpcActor(void* obj, const std::wstring& 
 // coin mint and jellyfish route need this native seam. Output is still filtered
 // by the NPC/world-actor allowlists; unrelated births remain host-local.
 constexpr const wchar_t* kConsoleNpcOutputs[]={L"rufus_C",L"thiccfus_C",nullptr};
+constexpr const wchar_t* kSuperFogOutputs[]={L"HoelUfo_C",nullptr};
+constexpr const wchar_t* kHoelOutputs[]={L"hoelUfoAttack_C",nullptr};
 constexpr const wchar_t* kSlapperOutputs[]={L"arirSlapper_C",nullptr};
+constexpr const wchar_t* kTentacleBallOutputs[]={L"tentacleBallShot_C",nullptr};
+constexpr const wchar_t* kKavotiaOutputs[]={L"kavotiaShot_C",nullptr};
 constexpr ExSpawnSource kExSpawnSources[] = {
+    {L"superFog_C", kSuperFogOutputs},              // native white orb birth
+    {L"HoelUfo_C", kHoelOutputs},                  // native beam birth
     {L"slapperSummoner_C",kSlapperOutputs},        // chest component's native deferred spawn
+    {L"tentacleBall_C", kTentacleBallOutputs},      // tentacleBall laser shot birth
+    {L"kavotia_C", kKavotiaOutputs},                // kavotia laser shot birth
     {L"ui_console_C",kConsoleNpcOutputs},          // funny console's exact Character outputs
     {L"trigger_wispSwarm_C",     nullptr},          // the wisps event swarm
     {L"piramidSpawner_C",        nullptr},          // the piramid event chain

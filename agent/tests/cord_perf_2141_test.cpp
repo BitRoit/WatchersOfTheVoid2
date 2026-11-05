@@ -66,7 +66,7 @@ int main(){
  CHECK(identities==20000);return 0;
 #else
  CHECK(identities==200&&connects+disconnects+powers==0);
- identities=0;S::g_next=0;S::Tick();CHECK(identities==200);
+ identities=0;S::g_next=0;S::Tick();CHECK(identities==0); // clean rows are not redundantly repainted
  Reset();auto p=Packet();identities=0;S::Apply(p);S::Apply(p);CHECK(identities==0);S::Tick();CHECK(identities==2&&!connects);
  Reset();p=Packet();objects[0].socket=nullptr;objects[1].occupant=nullptr;S::Apply(p);S::Tick();CHECK(connects==1);
  Reset();p=Packet();objects[0].drag=true;p.socket={};S::Apply(p);S::Tick();CHECK(!disconnects);objects[0].drag=false;S::g_next=0;S::Tick();CHECK(disconnects==1);

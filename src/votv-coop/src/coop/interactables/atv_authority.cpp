@@ -412,6 +412,23 @@ void ResetRequests(AtvEntry& e) {
 
 Counters ReadCounters() { return g_counters; }
 
+void OnDisconnectForSlot(int slot) {
+    if (slot <= 0 || slot >= coop::net::kMaxPeers) return;
+    const uint64_t nowMs = coop::atv_sync::NowMs();
+    for (auto& kv : g_atvs) {
+        AtvEntry& e = kv.second;
+        if (e.occupantSlot == static_cast<uint8_t>(slot)) {
+            e.occupantSlot = kNoSeat;
+            e.stampDue = true;
+            UE_LOGI("atv_authority: slot %d disconnected -- cleared occupant seat on '%ls'", slot, kv.first.c_str());
+        }
+        if (e.syncerSlot == static_cast<uint8_t>(slot)) {
+            HandToHost(e, static_cast<uint8_t>(slot), nowMs);
+            UE_LOGI("atv_authority: slot %d disconnected -- handed syncer authority back to host on '%ls'", slot, kv.first.c_str());
+        }
+    }
+}
+
 void LogSummary() {
     unsigned long long refusedTotal = 0;
     char byReason[320] = {};

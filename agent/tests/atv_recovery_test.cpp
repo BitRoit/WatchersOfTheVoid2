@@ -13,8 +13,8 @@ int functions[7]{};
 int missing=-1, invalid=-1, capacity=7, resolves=0, logs=0;
 int badOffset=121, badFrame=128;
 std::vector<std::pair<void*,ue_wrap::game_thread::UFunctionInterceptor>> hooks;
-int honkTries=0,mountTries=0,damageTries=0,subscriptions=0,scans=0;
-bool verbsReady=false;
+int honkPrimaryTries=0,honkFallbackTries=0,mountTries=0,damageTries=0,subscriptions=0,scans=0;
+bool honkPrimaryReady=false,honkFallbackReady=false;
 }
 namespace ue_wrap::log {void Write(Level,const char*,...){++test::logs;}}
 namespace ue_wrap::facts {
@@ -49,9 +49,16 @@ namespace ue_wrap::atv_condition {bool Resolve(){return true;}}
 namespace coop::atv_steering_sync {void Install(coop::net::Session*){}}
 namespace coop::atv_damage_gate {void Install(){++test::damageTries;}}
 namespace ue_wrap::script_gate {
-bool WatchClassName(const wchar_t*,const wchar_t* name,int,PreFn,PostFn) {
+bool WatchClassName(const wchar_t* cls,const wchar_t* name,int,PreFn,PostFn) {
+    assert(std::wcscmp(cls,L"ATV_C")==0);
     if(std::wcscmp(name,L"actionName")==0){++test::mountTries;return true;}
-    ++test::honkTries;return test::verbsReady;
+    if(std::wcscmp(name,L"InpActEvt_atv_honk_K2Node_InputActionEvent_14")==0){
+        ++test::honkPrimaryTries;return test::honkPrimaryReady;
+    }
+    if(std::wcscmp(name,L"InpActEvt_atv_honk_K2Node_InputActionEvent")==0){
+        ++test::honkFallbackTries;return test::honkFallbackReady;
+    }
+    std::abort(); // a changed production watch must be accounted for explicitly
 }
 void ResolvePendingNames(){}
 }
@@ -91,11 +98,18 @@ int main(int argc,char** argv) {
     assert(Armed() && test::hooks.size()==7);
     assert(test::subscriptions==1 && test::scans==1); // latch still protects one-time work
     const int done=test::resolves;coop::atv_sync::Install(&session);assert(test::resolves==done);
-    assert(test::honkTries==1 && test::mountTries==1);
+    assert(test::honkPrimaryTries==1 && test::honkFallbackTries==1 && test::mountTries==1);
     // The rejected honk retries independently without duplicating the mount watch.
-    test::verbsReady=true;std::this_thread::sleep_for(std::chrono::milliseconds(1010));
+    // Exercise primary success and fallback-only success in separate process modes.
+    test::honkPrimaryReady=mode!="capacity";
+    test::honkFallbackReady=mode=="capacity";
+    std::this_thread::sleep_for(std::chrono::milliseconds(1010));
     coop::atv_sync::Install(&session);
-    assert(test::honkTries==2 && test::mountTries==1);
+    assert(test::honkPrimaryTries==2 && test::honkFallbackTries==(mode=="capacity"?2:1) && test::mountTries==1);
+    // Once either exact name registered, no duplicate registration on later installs.
+    std::this_thread::sleep_for(std::chrono::milliseconds(1010));
+    coop::atv_sync::Install(&session);
+    assert(test::honkPrimaryTries==2 && test::honkFallbackTries==(mode=="capacity"?2:1) && test::mountTries==1);
     int owner=0,mirror=0;void* owned[]={&owner};PublishOwned(owned,1);SetActive(true);
     for(const auto& hook:test::hooks) {
         std::array<unsigned char,144> frame;frame.fill(0x5A);const auto original=frame;

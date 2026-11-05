@@ -10,7 +10,7 @@ class StateCache {
 public:
     static constexpr uint64_t kLifetimeMs = 60000;
     static constexpr size_t kCapacity = 256;
-    struct Row { net::CordStatePayload p; uint64_t at; };
+    struct Row { net::CordStatePayload p; uint64_t at; bool dirty = true; };
     bool Observe(const net::CordStatePayload& p, uint64_t now) {
         if (!Valid(p)) return false;
         Prune(now);
@@ -18,15 +18,32 @@ public:
             [&](const Row& r) { return Same(r.p.cord, p.cord); });
         if (row == rows_.end()) {
             if (rows_.size() >= kCapacity) return false;
-            rows_.push_back({p, now});
-        } else *row = {p, now};
+            rows_.push_back({p, now, /*dirty=*/true});
+        } else {
+            if (!Same(row->p.socket, p.socket) || row->p.powered != p.powered) {
+                row->dirty = true;
+            }
+            row->p = p;
+            row->at = now;
+        }
         // A new canonical occupant invalidates an older row for that socket, even
         // when the old cord's explicit unplug has not arrived/resolved yet.
         if (p.socket.kind) for (auto& r : rows_)
             if (!Same(r.p.cord, p.cord) && Same(r.p.socket, p.socket)) {
-                r.p.socket = {}; r.p.powered = 0;
+                r.p.socket = {}; r.p.powered = 0; r.dirty = true;
             }
         return true;
+    }
+    void MarkApplied(const net::CordStatePayload& p) {
+        for (auto& r : rows_)
+            if (Same(r.p.cord, p.cord) && Same(r.p.socket, p.socket) && r.p.powered == p.powered) {
+                r.dirty = false;
+                break;
+            }
+    }
+    bool HasDirty() const {
+        for (const auto& r : rows_) if (r.dirty) return true;
+        return false;
     }
     void Prune(uint64_t now) {
         rows_.erase(std::remove_if(rows_.begin(), rows_.end(),

@@ -19,9 +19,12 @@
 #include "ue_wrap/core/log.h"
 #include "ue_wrap/core/reflection.h"
 #include "ue_wrap/core/object_index.h"
+#include "ue_wrap/core/cached_obj_ref.h"
+#include "ue_wrap/core/fname_utils.h"
 #include "ue_wrap/facts/function_row.h"
 
 #include <atomic>
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -105,8 +108,12 @@ struct PendingGather {
     bool active = false;
     float lastDist = -1.0f;  // last measured mirror 2D dist (deadline diagnostics)
     int attempts = 0;        // dispatch attempts (branch-not-taken retries)
+    bool hasState = false;
+    long long receivedMs = 0;
+    coop::net::PyramidGatherStatePayload state{};
 };
 PendingGather g_pending;
+ue_wrap::CachedObjRef g_tailActor, g_tailMontage, g_tailAnimation;
 
 // Client: pyramid mirror eids whose actor tick we restored. The world-actor sync parks generic
 // mirrors tick-off, but the pyramid's tick carries the beam params, the look-at and the hover
@@ -304,6 +311,142 @@ void RestoreNewClientMirrors() {
     }
 }
 
+void* MemberObject(void* owner, const wchar_t* name) {
+    if (!owner || !R::IsLive(owner)) return nullptr;
+    const int off = R::FindPropertyOffset(R::ClassOf(owner), name);
+    if (off < 0) return nullptr;
+    void* object = *reinterpret_cast<void**>(static_cast<uint8_t*>(owner) + off);
+    return object && R::IsLive(object) ? object : nullptr;
+}
+template<class T> bool NativeValue(void* object, const wchar_t* name, T& value, void* montage = nullptr) {
+    if (!object || !R::IsLive(object)) return false;
+    ue_wrap::ParamFrame frame(R::FindDispatchFunctionCached(R::ClassOf(object), name));
+    if (!frame.valid() || (montage && !frame.Set<void*>(L"Montage", montage)) || !ue_wrap::Call(object, frame)) return false;
+    return frame.GetRaw(L"ReturnValue", &value, sizeof(value));
+}
+void* Animation(void* actor) {
+    void* mesh = MemberObject(actor, L"mesh"); void* anim = nullptr;
+    return NativeValue(mesh, L"GetAnimInstance", anim) && anim && R::IsLive(anim) ? anim : nullptr;
+}
+bool NamedBool(void* actor, const wchar_t* name, bool& value, bool write = false) {
+    int off = -1; uint8_t mask = 0;
+    if (!actor || !R::IsLive(actor) || !R::FindBoolProperty(R::ClassOf(actor), name, off, mask) || off < 0 || !mask) return false;
+    if (write) WriteBoolAt(actor, off, mask, value); else value = ReadBoolAt(actor, off, mask);
+    return true;
+}
+constexpr const wchar_t* kTimelines[] = {L"Timeline_0", L"Timeline_1", L"Timeline_2"};
+constexpr const wchar_t* kNotify = L"OnNotifyBegin_A01F082C4E4A49A74A14309C32B9B944";
+constexpr const wchar_t* kCompleted = L"OnCompleted_A01F082C4E4A49A74A14309C32B9B944";
+bool Notify(void* actor, const wchar_t* function, const wchar_t* name = nullptr) {
+    ue_wrap::ParamFrame frame(R::FindDispatchFunctionCached(R::ClassOf(actor), function));
+    if (!frame.valid()) return false;
+    if (name && !frame.Set(L"NotifyName", ue_wrap::fname_utils::StringToFName(name))) return false;
+    return ue_wrap::Call(actor, frame);
+}
+bool CaptureGatherState(void* actor, coop::net::PyramidGatherStatePayload& state) {
+    ue_wrap::CachedObjRef owner; owner.Set(actor);
+    void* anim = Animation(actor); void* montage = nullptr;
+    if (!owner.Get() || !NativeValue(anim, L"GetCurrentActiveMontage", montage) || !montage) return false;
+    if (!NativeValue(anim, L"Montage_GetPosition", state.montagePosition, montage) || !owner.Get() ||
+        !NativeValue(anim, L"Montage_GetPlayRate", state.playRate, montage) || !owner.Get()) return false;
+    for (int i = 0; i < 3; ++i) {
+        void* timeline = MemberObject(actor, kTimelines[i]); bool playing = false, reversing = false;
+        if (!NativeValue(timeline, L"GetPlaybackPosition", state.timelinePosition[i]) || !owner.Get() ||
+            !NativeValue(timeline, L"IsPlaying", playing) || !owner.Get() ||
+            !NativeValue(timeline, L"IsReversing", reversing) || !owner.Get()) return false;
+        if (playing) state.timelineFlags |= 1 << i;
+        if (reversing) state.timelineFlags |= 1 << (i+3);
+    }
+    bool consumed = false;
+    if (!NamedBool(actor, L"wispGathered", consumed)) return false;
+    state.consumed = consumed ? 1 : 0;
+    return true;
+}
+bool RestoreGatherState(void* actor, const PendingGather& pending, bool tail, bool reconstructNotifies = true) {
+    ue_wrap::CachedObjRef owner; owner.Set(actor);
+    auto* session = LoadSession();
+    void* anim = Animation(actor); void* montage = nullptr;
+    ue_wrap::CachedObjRef animation; animation.Set(anim);
+    ue_wrap::CachedObjRef timelines[3];
+    for (int i=0; i<3; ++i) {
+        timelines[i].Set(MemberObject(actor,kTimelines[i]));
+        if (!timelines[i].Get()) return false; // preflight before montage/notifies mutate native state
+    }
+    auto contextValid = [&] {
+        auto* s=LoadSession();
+        return owner.Get() && animation.Get() && s==session && s && s->connected() && s->role()==coop::net::Role::Client;
+    };
+    auto valid = [&] {
+        if (!contextValid()) return false;
+        // A replaced animation can remain live. Resolve the actor's current binding,
+        // then revalidate after GetAnimInstance, which itself crosses a native call.
+        void* currentAnimation=Animation(actor);
+        if (!contextValid() || currentAnimation!=animation.Get()) return false;
+        for (int i=0; i<3; ++i)
+            if (!timelines[i].Get() || MemberObject(actor,kTimelines[i])!=timelines[i].Get()) return false;
+        return true;
+    };
+    if (!valid()) return false;
+    const bool reuseTail = tail && g_tailActor.Is(actor) && g_tailAnimation.Is(anim) && g_tailMontage.Get();
+    if (reuseTail) montage=g_tailMontage.Get();
+    if (tail && !reuseTail) {
+        montage = R::FindObject(L"piramid_sk_prot1_Skeleton_Montage", L"AnimMontage");
+        ue_wrap::ParamFrame play(R::FindDispatchFunctionCached(R::ClassOf(anim), L"Montage_Play"));
+        if (!montage || !play.valid() || !play.Set<void*>(L"MontageToPlay",montage) ||
+            !play.Set(L"InPlayRate", pending.state.playRate) || !ue_wrap::Call(anim,play) || !valid()) return false;
+        if (play.Get<float>(L"ReturnValue") <= 0) return false;
+        g_tailActor.Set(actor); g_tailMontage.Set(montage); g_tailAnimation.Set(anim);
+        WriteBoolAt(actor, g_gatheringOff, g_gatheringMask, true);
+        WriteBoolAt(actor, g_isWalkingOff, g_isWalkingMask, false);
+    } else if (!tail && (!NativeValue(anim, L"GetCurrentActiveMontage", montage) || !montage || !valid())) return false;
+    // The native reached-check starts at rate 1; seeking alone does not change that rate.
+    ue_wrap::ParamFrame rate(R::FindDispatchFunctionCached(R::ClassOf(anim), L"Montage_SetPlayRate"));
+    if (!rate.valid() || !rate.Set<void*>(L"Montage",montage) ||
+        !rate.Set(L"NewPlayRate",pending.state.playRate) || !ue_wrap::Call(anim,rate) || !valid()) return false;
+    // A consumed snapshot may arrive while a pose still names its previous target.
+    // Native del destroys wispTarget: the tail must never consume an unrelated live mirror.
+    if (tail) *reinterpret_cast<void**>(reinterpret_cast<uint8_t*>(actor) + g_offWispTarget) = nullptr;
+    // Reconstruct notifications already crossed by the host, then set exact
+    // native timeline positions. Future live notifies still belong to its proxy.
+    if (!tail && reconstructNotifies && pending.state.timelinePosition[0] > 0 && (!Notify(actor,kNotify,L"begin") || !valid())) return false;
+    if (!tail && reconstructNotifies && pending.state.timelinePosition[1] > 0 && (!Notify(actor,kNotify,L"gather") || !valid())) return false;
+    if (tail && !reuseTail && (!Notify(actor,kNotify,L"del") || !valid())) return false;
+    const float waited = static_cast<float>(NowMs()-pending.receivedMs)/1000.f;
+    ue_wrap::ParamFrame seek(R::FindDispatchFunctionCached(R::ClassOf(anim), L"Montage_SetPosition"));
+    if (!seek.valid() || !seek.Set<void*>(L"Montage",montage) ||
+        !seek.Set(L"NewPosition",pending.state.montagePosition + waited*pending.state.playRate) ||
+        !ue_wrap::Call(anim,seek) || !valid()) return false;
+    for (int i=0; i<3; ++i) {
+        void* timeline=timelines[i].Get();
+        const bool playing=(pending.state.timelineFlags & (1<<i))!=0;
+        const bool reverse=(pending.state.timelineFlags & (1<<(i+3)))!=0;
+        if (timeline) {
+            ue_wrap::ParamFrame run(R::FindDispatchFunctionCached(R::ClassOf(timeline),playing?(reverse?L"Reverse":L"Play"):L"Stop"));
+            if (!run.valid() || !ue_wrap::Call(timeline,run) || !valid()) return false;
+        }
+        ue_wrap::ParamFrame set(R::FindDispatchFunctionCached(R::ClassOf(timeline),L"SetPlaybackPosition"));
+        const float position=std::max(0.f,pending.state.timelinePosition[i]+(playing?(reverse?-waited:waited):0.f));
+        if (!set.valid() || !set.Set(L"NewPosition",position) || !set.Set(L"bFireEvents",false) ||
+            !set.Set(L"bFireUpdate",true) || !ue_wrap::Call(timeline,set) || !valid()) return false;
+    }
+    if (tail) { g_tailActor.Set(actor); g_tailMontage.Set(montage); g_tailAnimation.Set(anim); }
+    return true;
+}
+void TickGatherTail() {
+    void* actor=g_tailActor.Get(); void* montage=g_tailMontage.Get();
+    if (!actor || !montage) { g_tailActor.Reset(); g_tailMontage.Reset(); g_tailAnimation.Reset(); return; }
+    ue_wrap::CachedObjRef owner=g_tailActor, asset=g_tailMontage;
+    void* anim=g_tailAnimation.Get();
+    if (!anim || Animation(actor)!=anim || !owner.Get() || !g_tailAnimation.Get()) { g_tailActor.Reset(); g_tailMontage.Reset(); g_tailAnimation.Reset(); return; }
+    ue_wrap::CachedObjRef animation=g_tailAnimation;
+    bool playing=true;
+    if (NativeValue(anim,L"Montage_IsPlaying",playing,montage) && !playing && owner.Get() &&
+        asset.Get() && animation.Get() && g_tailActor.Is(actor) && g_tailMontage.Is(montage)) {
+        g_tailActor.Reset(); g_tailMontage.Reset(); g_tailAnimation.Reset();
+        (void)Notify(actor,kCompleted);
+    }
+}
+
 // Attempt the queued gather replay; retried every tick until converged or the deadline.
 void TryReplayPendingGather() {
     if (!g_pending.active) return;
@@ -318,12 +461,33 @@ void TryReplayPendingGather() {
     if (!pel || !pel->IsMirror()) return;
     void* pyr = pel->GetActor();
     if (!pyr || !R::IsLiveByIndex(pyr, pel->GetInternalIdx())) return;
+    if (g_pending.hasState && g_pending.state.consumed) {
+        const PendingGather snapshot = g_pending;
+        if (!Animation(pyr)) return;
+        // No retired wisp is respawned or looked up for the remaining arm-close.
+        const bool restored = RestoreGatherState(pyr,snapshot,true);
+        // A reflective call can have partial effects: never restart its montage
+        // or repeat notifies after an uncertain restore failure.
+        g_pending.active=false;
+        if (!restored) UE_LOGW("piramid-gather: native tail seek failed eid=%u",snapshot.pyramidEid);
+        return;
+    }
     coop::element::Npc* wel = coop::element::NpcMirrors().Get(g_pending.wispEid);
     if (!wel) return;
     void* wisp = wel->GetActor();
     if (!wisp || !R::IsLiveByIndex(wisp, wel->GetInternalIdx())) return;
     if (ReadBoolAt(pyr, g_gatheringOff, g_gatheringMask)) {
-        // Already mid-gather (a duplicate relay, or a prior replay landed): nothing to stage.
+        // A different active gather still owns its target and proxy. Wait for it to
+        // retire rather than replacing its choreography or losing this pending state.
+        void* target=*reinterpret_cast<void**>(reinterpret_cast<uint8_t*>(pyr) + g_offWispTarget);
+        if (target!=wisp) return;
+        if (g_pending.hasState) {
+            const PendingGather snapshot=g_pending;
+            // This proxy already owns live notifies/audio. Correct its clocks without
+            // replaying begin/gather callbacks or invoking reached-check a second time.
+            if (!RestoreGatherState(pyr,snapshot,false,false))
+                UE_LOGW("piramid-gather: active join seek failed eid=%u",snapshot.pyramidEid);
+        }
         g_pending.active = false;
         return;
     }
@@ -367,6 +531,11 @@ void TryReplayPendingGather() {
     // principle as the pyramid mirror's own live tick. The wisp dies seconds later at the
     // montage's notify.
     E::SetActorTickEnabled(wisp, true);
+    if (g_pending.hasState) {
+        const PendingGather snapshot = g_pending;
+        if (!RestoreGatherState(pyr,snapshot,false))
+            UE_LOGW("piramid-gather: join montage/timeline seek unavailable for eid=%u", snapshot.pyramidEid);
+    }
     UE_LOGI("piramid-gather[client]: replay OK -- native gather running on mirror; wisp mirror "
             "tick ENABLED for the gathered rise (pyramidEid=%u wispEid=%u dist=%.0f attempts=%d)",
             g_pending.pyramidEid, g_pending.wispEid, g_pending.lastDist, g_pending.attempts);
@@ -420,6 +589,7 @@ void Tick() {
         RestoreNewClientMirrors();
     }
     TryReplayPendingGather();
+    TickGatherTail();
 }
 
 bool ReadHostHeadingYaw(void* actor, float& outYaw) {
@@ -537,15 +707,14 @@ void QueueConnectBroadcastForSlot(int slot) {
         if (!ReadBoolAt(pyr, g_gatheringOff, g_gatheringMask)) continue;
         void* wisp = *reinterpret_cast<void**>(reinterpret_cast<uint8_t*>(pyr) + g_offWispTarget);
         const uint32_t wispEid = wisp ? FindNpcEidForActor(wisp) : 0;  // ptr compare only -- no deref
-        if (wispEid == 0) {
-            UE_LOGI("piramid-gather[host]: join-edge slot=%d -- gather in flight but the wisp is "
-                    "already retired; not re-sending (joiner misses only the beam tail)", slot);
+        coop::net::PyramidGatherStatePayload state{};
+        auto& p=state.gather;
+        p.pyramidEid = static_cast<uint32_t>(el->GetId()); p.wispEid = wispEid;
+        if (!CaptureGatherState(pyr,state) || (!wispEid && !state.consumed)) {
+            UE_LOGW("piramid-gather: cannot capture native join phase eid=%u",p.pyramidEid);
             continue;
         }
-        coop::net::PyramidGatherPayload p{};
-        p.pyramidEid = static_cast<uint32_t>(el->GetId());
-        p.wispEid = wispEid;
-        if (s->SendReliableToSlot(slot, coop::net::ReliableKind::PyramidGather, &p, sizeof(p))) {
+        if (s->SendReliableToSlot(slot, coop::net::ReliableKind::PyramidGather, &state, sizeof(state))) {
             UE_LOGI("piramid-gather[host]: join-edge slot=%d re-sent in-flight gather "
                     "pyramidEid=%u wispEid=%u", slot, p.pyramidEid, p.wispEid);
         } else {
@@ -557,6 +726,7 @@ void QueueConnectBroadcastForSlot(int slot) {
 
 void OnDisconnect() {
     g_pending = PendingGather{};
+    g_tailActor.Reset(); g_tailMontage.Reset(); g_tailAnimation.Reset();
     g_lastGathering.clear();
     g_tickRestored.clear();
     // The host target memo: a recycled actor address in a new session must not alias the old
@@ -578,6 +748,7 @@ void OnPyramidGather(const coop::net::PyramidGatherPayload& payload) {
                 payload.pyramidEid, payload.wispEid);
         return;
     }
+    g_pending = PendingGather{};
     g_pending.pyramidEid = payload.pyramidEid;
     g_pending.wispEid = payload.wispEid;
     g_pending.deadlineMs = NowMs() + kReplayDeadlineMs;
@@ -586,6 +757,22 @@ void OnPyramidGather(const coop::net::PyramidGatherPayload& payload) {
     g_pending.active = true;
     UE_LOGI("piramid-gather[client]: queued replay pyramidEid=%u wispEid=%u (deadline %lld ms)",
             payload.pyramidEid, payload.wispEid, kReplayDeadlineMs);
+}
+
+void OnPyramidGatherState(const coop::net::PyramidGatherStatePayload& state) {
+    auto* s=LoadSession();
+    if (!s || !s->connected() || s->role()!=coop::net::Role::Client || state.reserved ||
+        (state.timelineFlags & ~uint8_t{63}) || state.consumed>1 ||
+        !std::isfinite(state.montagePosition) || state.montagePosition<0 || state.montagePosition>600 ||
+        !std::isfinite(state.playRate) || state.playRate<0.1f || state.playRate>4 ||
+        !coop::element::Registry::IsAllowedHostAllocatedEid(state.gather.pyramidEid) ||
+        (!coop::element::Registry::IsAllowedHostAllocatedEid(state.gather.wispEid) &&
+         !(state.consumed && !state.gather.wispEid))) return;
+    for (float p:state.timelinePosition) if (!std::isfinite(p) || p<0 || p>600) return;
+    g_pending=PendingGather{};
+    g_pending.pyramidEid=state.gather.pyramidEid; g_pending.wispEid=state.gather.wispEid;
+    g_pending.receivedMs=NowMs(); g_pending.deadlineMs=g_pending.receivedMs+kReplayDeadlineMs;
+    g_pending.hasState=true; g_pending.state=state; g_pending.active=true;
 }
 
 bool DebugHooksArmed() { return g_armedAtomic.load(std::memory_order_acquire); }

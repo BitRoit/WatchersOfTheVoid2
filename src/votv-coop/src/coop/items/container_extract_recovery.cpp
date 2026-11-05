@@ -166,6 +166,7 @@ bool Attach(const std::shared_ptr<Debt>& row,void* actor) {
     row->actor.Set(actor);row->actorType.Set(R::ClassOf(actor));row->absent=false;return true;
 }
 
+void Drain();
 void Recover(const std::shared_ptr<Debt>& row) {
     if(!Current(row) || row->busy || !row->debit || !row->refund || row->uncertain)return;
     row->busy=true;struct Guard{Debt& row;~Guard(){row.busy=false;}} guard{*row};
@@ -203,6 +204,7 @@ SG::Verdict BeforeExtract(const SG::Call& call) {
     bool personal=false;
     if(!CI::ReadPersonalFlag(inv,personal))return SG::Verdict::Cancel;
     if(personal)return SG::Verdict::Run;
+    Drain();
     const auto layout=ExtractLayout(call.function);
     if(layout.index<0 || layout.record<0 || layout.actor<0 || layout.begun<0 || layout.pocket<0 || layout.taken<0 || g_debts.size()>=kDebtCap)return SG::Verdict::Cancel;
     auto row=std::make_shared<Debt>();row->id=++g_sequence;row->extractInvocation=call.invocation;
@@ -363,7 +365,7 @@ void OnDisconnect() {
         g_settlingSession=session;g_settlingEpoch=epoch;
         struct Guard{net::Session* session;uint64_t epoch;~Guard(){g_settlingSession=session;g_settlingEpoch=epoch;}} guard{previous,previousEpoch};
         std::vector<std::shared_ptr<Debt>> work;
-        for(const auto& [id,row]:g_debts)if(row->debit && row->refund && row->finished && !row->uncertain)work.push_back(row);
+        for(const auto& [id,row]:g_debts)if(row->debit && (!row->pocketDone || row->refund)){ if(row->uncertain){ row->uncertain=false; row->refund=true; } work.push_back(row); }
         for(const auto& row:work) {
             if(g_epoch!=epoch || g_session!=session)break;
             Recover(row);

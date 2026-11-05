@@ -413,7 +413,8 @@ void DrainReseedQueue() {
     ::QueryPerformanceCounter(&t0);
     size_t adoptedThisTick = 0;
     size_t processed = 0;
-    while (g_reseedQueueHead < g_reseedQueue.size()) {
+    constexpr size_t kMaxItemsPerDrainTick = 32;
+    while (g_reseedQueueHead < g_reseedQueue.size() && processed < kMaxItemsPerDrainTick) {
         // The budget checked every item: eight back-to-back adoptions with expresses overshot a
         // per-eight check by more than double.
         if (processed != 0) {

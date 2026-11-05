@@ -298,7 +298,15 @@ int SweepReconcileSaveTimeTwins() {
                                : (u1 ? "unbound-present-but-unmatched(?)"
                                      : (u30 ? "unbound near but >1cm off (fuzzy)" : "CLEAN (no orphan @old)")));
             }
-            if (++p.unresolvedPasses >= kMaxTwinPasses) {
+            if (p.hostVacate && coop::join_membership_sweep::HasLoadTailQuiesced()) {
+                // A host-vacate twin only exists to clean up a stale native lingering at @old.
+                // If no native sits at @old and the load tail has quiesced, the old location is clean;
+                // stop retrying immediately rather than running 40 passes of full-array scans.
+                resolvedEids.push_back(eid);
+                continue;
+            }
+            const int maxPasses = coop::join_membership_sweep::HasLoadTailQuiesced() ? 2 : kMaxTwinPasses;
+            if (++p.unresolvedPasses >= maxPasses) {
                 resolvedEids.push_back(eid);  // no native@old ever materialized here -> stop retrying (FPS-pin guard)
                 NoteGaveUp(eid, p, bound);
             }

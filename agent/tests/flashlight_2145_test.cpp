@@ -5,13 +5,13 @@
 #define FLASHLIGHT_STATE_SOURCE "../../src/votv-coop/src/coop/player/item_activate.cpp"
 #endif
 #include FLASHLIGHT_STATE_SOURCE
-namespace test {bool haveLight=true,settersReady=true,snapshotReady=true;int applies=0,cones=0,visibility=0;float lastIntensity=0;std::function<void()> onSnapshot,onLightRead,onVisibility;ue_wrap::engine::MainPlayerFlashlightState lightState{true,true,false,0};ue_wrap::engine::FlashlightSnapshot light{5,45,20,true},remoteLight{5,45,20,true};}
+namespace test {bool haveLight=true,settersReady=true,snapshotReady=true,absoluteReady=true;int applies=0,cones=0,visibility=0,absolute=0;float lastIntensity=0;std::function<void()> onSnapshot,onLightRead,onVisibility,onShadow;ue_wrap::engine::MainPlayerFlashlightState lightState{true,true,false,0};ue_wrap::engine::FlashlightSnapshot light{5,45,20,true},remoteLight{5,45,20,true};}
 namespace ue_wrap::engine {
 void* GetController(void* a){return a;}void* GetMainPlayerLightR(void* a){auto cb=std::move(test::onLightRead);test::onLightRead={};if(cb)cb();return test::haveLight?a:nullptr;}
 bool ReadMainPlayerFlashlightState(void*,MainPlayerFlashlightState& out){out=test::lightState;return true;}
 bool ReadFlashlightSnapshot(void* object,FlashlightSnapshot& out){out=object==&test::ui?test::remoteLight:test::light;auto cb=std::move(test::onSnapshot);test::onSnapshot={};if(cb)cb();return test::snapshotReady;}
 bool SetSceneComponentVisibility(void*,bool visible,bool){++test::visibility;if(test::settersReady)test::remoteLight.visible=visible;auto cb=std::move(test::onVisibility);test::onVisibility={};if(cb)cb();return test::settersReady;}bool SetLightIntensity(void*,float value){++test::applies;test::lastIntensity=value;if(test::settersReady)test::remoteLight.intensity=value;test::Callback();return test::settersReady;}
-bool SetSpotLightOuterConeAngle(void*,float value){++test::cones;test::remoteLight.outerConeAngle=value;return true;}bool SetSpotLightInnerConeAngle(void*,float value){++test::cones;test::remoteLight.innerConeAngle=value;return true;}
+bool SetSpotLightOuterConeAngle(void*,float value){++test::cones;test::remoteLight.outerConeAngle=value;return true;}bool SetSpotLightInnerConeAngle(void*,float value){++test::cones;test::remoteLight.innerConeAngle=value;return true;}bool SetLightCastShadows(void*,bool){auto cb=std::move(test::onShadow);test::onShadow={};if(cb)cb();return true;}bool SetLightAttenuationRadius(void*,float){return true;}bool SetComponentAbsolute(void*,bool loc,bool rot,bool scale){++test::absolute;return test::absoluteReady&&loc&&rot&&!scale;}
 }
 namespace coop::flashlight_click_sound {void PlayIfStateChanged(void*,uint8_t,bool){}}
 namespace test {uint32_t sessionSerial=1;std::array<coop::roster_ledger::Row,coop::players::kMaxPeers> people;}
@@ -21,10 +21,10 @@ namespace test {
 namespace S=coop::item_activate;
 coop::net::Session lifetimeSession,otherSession;
 void ResetLifetime(){
- callback={};onSnapshot={};onLightRead={};onVisibility={};S::OnDisconnect();
+ callback={};onSnapshot={};onLightRead={};onVisibility={};onShadow={};S::OnDisconnect();
  lifetimeSession={};otherSession={};actor.live=ui.live=true;++actor.serial;++ui.serial;
  auto& registry=coop::players::Registry::Get();registry.local=&actor;registry.puppet.actor=&ui;registry.puppetSlot=0;
- haveLight=settersReady=snapshotReady=true;applies=cones=visibility=0;lightState={true,true,false,0};light=remoteLight={5,45,20,true};
+ haveLight=settersReady=snapshotReady=absoluteReady=true;applies=cones=visibility=absolute=0;lightState={true,true,false,0};light=remoteLight={5,45,20,true};
  for(auto& person:people)person.playerNo=1;
  ++sessionSerial;S::Install(&lifetimeSession);
 }
@@ -75,7 +75,10 @@ void PeerLifetime(){
 void ExactActor(){
  ResetLifetime();auto p=Payload();Obj foreign{3};
  CHECK(!S::ApplyToPuppet(&actor,p,0));CHECK(!S::ApplyToPuppet(&foreign,p,0));CHECK(!S::ApplyToPuppet(&ui,p,1));CHECK(!visibility);
- CHECK(S::ApplyToPuppet(&ui,p,0));CHECK(visibility==1);
+ CHECK(S::ApplyToPuppet(&ui,p,0));CHECK(visibility==1&&absolute==1);
+ // Absolute attachment failure leaves the existing light-state lane usable; spawn/retry will
+ // attempt it again instead of turning an otherwise working remote flashlight off.
+ ResetLifetime();absoluteReady=false;CHECK(S::ApplyToPuppet(&ui,p,0));CHECK(visibility==1&&absolute==1);
 }
 void OwnedPayload(){
  ResetLifetime();auto p=Payload();onLightRead=[&]{p.intensity=std::numeric_limits<float>::infinity();p.outerConeAngle=0;};
@@ -85,13 +88,13 @@ void OwnedPayload(){
 }
 void FirstSetter(){
  for(int mode=0;mode<4;++mode){
-  ResetLifetime();auto p=Payload();onLightRead=[&]{
+  ResetLifetime();auto p=Payload();onShadow=[&]{
    if(mode==0)++ui.serial;if(mode==1)++people[0].playerNo;if(mode==2)++lifetimeSession.peerEpoch;if(mode==3)++sessionSerial;
   };
   CHECK(!S::ApplyToPuppet(&ui,p,0));CHECK(!visibility&&!applies&&!cones);
  }
- ResetLifetime();auto p=Payload();onLightRead=[&]{onLightRead=[&]{++people[0].playerNo;};};
- CHECK(!S::ApplyToPuppet(&ui,p,0));CHECK(!visibility); // replacement during the final binding getter
+ ResetLifetime();auto p=Payload();onShadow=[&]{onLightRead=[&]{++people[0].playerNo;};};
+ CHECK(!S::ApplyToPuppet(&ui,p,0));CHECK(!visibility); // replacement during the post-shadow binding getter
 }
 void SendCompletion(){
  for(int mode=0;mode<3;++mode){

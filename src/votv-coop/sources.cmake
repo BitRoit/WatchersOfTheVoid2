@@ -109,6 +109,7 @@ set(VOTVCOOP_SOURCES
     src/ue_wrap/world/directionalwind.cpp
     src/ue_wrap/devices/lightswitch.cpp
     src/ue_wrap/devices/garage.cpp
+    src/ue_wrap/devices/roomba.cpp
     src/ue_wrap/devices/appliance.cpp
     src/ue_wrap/devices/kitchen_machine.cpp
     src/ue_wrap/devices/grill.cpp
@@ -184,6 +185,7 @@ set(VOTVCOOP_SOURCES
     src/ue_wrap/actors/llama_begin_restore.cpp
     src/ue_wrap/actors/fossilhound_presentation.cpp
     src/ue_wrap/actors/wisp.cpp
+    src/ue_wrap/actors/hoel_ufo.cpp
     src/ue_wrap/actors/swinger.cpp
     src/ue_wrap/actors/broom.cpp
     src/ue_wrap/actors/fire_extinguisher.cpp
@@ -435,6 +437,11 @@ set(VOTVCOOP_SOURCES
     src/coop/creatures/deer_sync.cpp
     src/coop/creatures/centipede_sync.cpp
     src/coop/creatures/mannequin_sync.cpp
+    src/ue_wrap/actors/mannequin.cpp
+    src/coop/creatures/mannequin_sight_sync.cpp
+    src/coop/creatures/mannequin_interaction.cpp
+    src/coop/creatures/mannequin_identity.cpp
+    src/coop/creatures/mannequin_target.cpp
     src/coop/creatures/grayboar_actions.cpp
     src/coop/creatures/kavotia_sync.cpp
     src/coop/creatures/grayboar_turn.cpp

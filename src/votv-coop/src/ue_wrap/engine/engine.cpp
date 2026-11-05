@@ -556,6 +556,24 @@ bool SetComponentWorldRotation(void* component, const FRotator& rotation) {
     return Call(component,f)&&current();
 }
 
+bool SetComponentWorldLocationAndRotation(void* component, const FVector& location, const FRotator& rotation) {
+    if(!component||!R::IsLive(component)||
+       !std::isfinite(location.X)||!std::isfinite(location.Y)||!std::isfinite(location.Z)||
+       !std::isfinite(rotation.Pitch)||!std::isfinite(rotation.Yaw)||!std::isfinite(rotation.Roll))return false;
+    CachedObjRef object,cls,function;object.Set(component);cls.Set(R::ClassOf(component));
+    function.Set(R::FindDispatchFunctionCached(cls.Get(),P::name::SetWorldLocationAndRotationFn));
+    const auto generation=world_identity::Generation();void* world=world_identity::CurrentWorld();
+    const auto current=[&]{return object.Get()&&cls.Get()&&function.Get()&&world&&
+        generation==world_identity::Generation()&&world==world_identity::CurrentWorld()&&
+        R::ClassOf(component)==cls.Get()&&R::FindDispatchFunctionCached(cls.Get(),P::name::SetWorldLocationAndRotationFn)==function.Get();};
+    if(!current())return false;
+    ParamFrame f(function.Get());
+    if(!f.valid()||!f.Set<FVector>(L"NewLocation",location)||!f.Set<FRotator>(L"NewRotation",rotation)||
+       !f.Set<bool>(L"bSweep",false)||!f.Set<bool>(L"bTeleport",true)||!current())return false;
+    return Call(component,f)&&current();
+    return Call(component,f)&&current();
+}
+
 bool ProjectWorldToScreen(void* playerController, const FVector& world,
                           FVector2D& outScreen, bool viewportRelative) {
     if (!playerController || !R::IsLive(playerController)) return false;

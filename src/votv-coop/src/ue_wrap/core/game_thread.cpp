@@ -379,10 +379,16 @@ bool DrainPostedTasksAtTopLevel() {
     Pump();
     const long long drainMs = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - drainT0).count();
-    if (drainMs >= 10)
-        UE_LOGI("[HITCH-SRC] posted-task drain = %lld ms (OUR code caused this frame's cost; the "
-                "OUTER bracket -- any net_pump::Tick line for the same frame is inside this one)",
-                drainMs);
+    if (drainMs >= 35) {
+        static auto sLastDrainLog = std::chrono::steady_clock::time_point{};
+        const auto now = std::chrono::steady_clock::now();
+        if (now - sLastDrainLog >= std::chrono::milliseconds(500)) {
+            sLastDrainLog = now;
+            UE_LOGI("[HITCH-SRC] posted-task drain = %lld ms (OUR code caused this frame's cost; the "
+                    "OUTER bracket -- any net_pump::Tick line for the same frame is inside this one)",
+                    drainMs);
+        }
+    }
     return true;
 }
 

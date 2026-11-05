@@ -7,7 +7,8 @@
 #include "coop/net/protocol.h"
 #include "coop/net/session.h"
 #include "coop/net/wire_key_util.h"
-#include "coop/player/hand_item.h"         // what the sender's hand holds, and held last
+#include "coop/player/hand_item.h"
+#include "coop/props/prop_lifecycle.h"         // what the sender's hand holds, and held last
 #include "coop/player/players_registry.h"
 #include "coop/player/remote_player.h"
 #include "coop/session/net_pump.h"  // IsInAnnouncedWorld: a client's own world load runs natively
@@ -382,6 +383,13 @@ sg::Verdict OnVerbPre(const sg::Call& call) {
         UE_LOGW("[DOOR-VERB] the %s on key='%ls' was not sent (the session refused it); the door "
                 "stays as the host has it", VerbName(verb), key.c_str());
         return sg::Verdict::Cancel;
+    }
+    if (verb == V::kPry) {
+        // A client prying a door consumes its held crowbar in sync with singleplayer once intent is sent
+        void* handActor = coop::hand_item::LocalHandActor();
+        if (handActor && ue_wrap::reflection::ClassNameOf(handActor) == L"prop_crowbar_C") {
+            coop::prop_lifecycle::DestroyLocalProp(handActor, false);
+        }
     }
     ++g_sent;
     if (verb == V::kPress) ++g_sentPress;

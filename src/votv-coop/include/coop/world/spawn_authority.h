@@ -38,6 +38,8 @@ namespace coop::spawn_authority {
 // a (class, latent-UUID) grain. Discovery of new classes stays with the ini-gated rng_roll_census,
 // not this module.
 void Install(coop::net::Session* session);
+// A dangerous native BeginPlay must never run before its refusal is live.
+bool HoelMirrorGatesReady(bool beam);
 
 // Whether this process holds a running CLIENT session: the gate of every refusal in the table, and of the
 // other client-only seams that must not bleed into single player or a host. The running flag flips true in

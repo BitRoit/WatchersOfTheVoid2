@@ -31,6 +31,15 @@ struct AtvEntry {
     int32_t idx   = -1;
     uint64_t lastSentMs   = 0;
     uint64_t lastPktMs    = 0;     // arrival of the last correcting packet -- the corrector's dt
+    ue_wrap::FVector lastCorrectionWirePos{};
+    bool haveCorrectionWirePos = false;
+    uint64_t lastPlanarCorrectionLogMs = 0;
+    // Corrector's fixed authoritative pose anchor: suspension velocity is not travel.
+    ue_wrap::FVector restAnchorPos{};
+    ue_wrap::FRotator restAnchorRot{};
+    uint64_t restAnchorSinceMs = 0;
+    uint8_t restAnchorSyncer = 0xFF;
+    uint64_t lastCorrectionDecisionMs = 0;
     // ---- the host's table: what the host decided, on every peer (the host writes it by its judgement,
     // a client by the host's stamp and answers). Three concepts, never aliased: the seat, the syncer, the
     // local body's own sit and carry below. ----
@@ -127,6 +136,12 @@ struct AtvEntry {
     coop::net::AtvConditionEditPayload pendingService{};
     bool     hasPendingService = false;
     uint64_t lastServiceSentMs = 0;
+    int      seatedReplaces = 0;   // ATVS1: the same bound for an OCCUPIED author that is at rest
+                                   // (seat taken, not idle). restReplaces is reset on every
+                                   // non-idle packet, so on its own it never bounds a seated rig:
+                                   // a mirror that sagged under a still driver was re-placed on
+                                   // every packet, 14-19 times a second. Ends only on author
+                                   // movement, an authority change or a snapshot, never on time.
     int      restReplaces = 0;     // re-places of a mirror whose author is at rest, WITHIN one
                                    // episode (see lastRestPlaceMs).
                                    // A corrector owes a convergence check on EVERY arm it

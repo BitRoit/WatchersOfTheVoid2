@@ -49,6 +49,26 @@ void* g_setLightIntensityFn      = nullptr;
 void* g_setSceneVisibilityFn     = nullptr;
 void* g_setSpotOuterConeAngleFn  = nullptr;
 void* g_setSpotInnerConeAngleFn  = nullptr;
+void* g_setLightCastShadowsFn    = nullptr;
+void* g_setAttenuationRadiusFn   = nullptr;
+
+void* ResolveLightCastShadowsFn(void* light) {
+    if (g_setLightCastShadowsFn) return g_setLightCastShadowsFn;
+    void* cls = R::FindClass(L"LightComponentBase");
+    if (!cls && light) cls = R::ClassOf(light);
+    if (!cls) return nullptr;
+    g_setLightCastShadowsFn = R::FindFunction(cls, P::name::SetCastShadowsFn);
+    return g_setLightCastShadowsFn;
+}
+
+void* ResolveLightAttenuationRadiusFn(void* light) {
+    if (g_setAttenuationRadiusFn) return g_setAttenuationRadiusFn;
+    void* cls = R::FindClass(L"LocalLightComponent");
+    if (!cls && light) cls = R::ClassOf(light);
+    if (!cls) return nullptr;
+    g_setAttenuationRadiusFn = R::FindFunction(cls, L"SetAttenuationRadius");
+    return g_setAttenuationRadiusFn;
+}
 
 void* ResolveLightIntensityFn() {
     if (g_setLightIntensityFn) return g_setLightIntensityFn;
@@ -534,6 +554,22 @@ bool SetLightIntensity(void* light, float newIntensity) {
     return f.Set<float>(L"NewIntensity", newIntensity) && Call(light, f);
 }
 
+bool SetLightCastShadows(void* light, bool castShadows) {
+    if (!light || !R::IsLive(light)) return false;
+    void* fn = ResolveLightCastShadowsFn(light);
+    if (!fn) return false;
+    ParamFrame f(fn);
+    return f.Set<bool>(L"bNewValue", castShadows) && Call(light, f);
+}
+
+bool SetLightAttenuationRadius(void* light, float newRadius) {
+    if (!light || !R::IsLive(light)) return false;
+    void* fn = ResolveLightAttenuationRadiusFn(light);
+    if (!fn) return false;
+    ParamFrame f(fn);
+    return f.Set<float>(L"NewRadius", newRadius) && Call(light, f);
+}
+
 bool SetSceneComponentVisibility(void* sceneComponent, bool newVisibility, bool propagateToChildren) {
     if (!sceneComponent || !R::IsLive(sceneComponent)) return false;
     void* fn = ResolveSceneVisibilityFn();
@@ -623,6 +659,18 @@ bool ReadMainPlayerStartInvinc(void* mainPlayer, bool& on) {
     }
     on = (reinterpret_cast<const uint8_t*>(mainPlayer)[s_startInvinc.byte] & s_startInvinc.mask) != 0;
     return true;
+}
+
+bool ReadMainPlayerIsWakingUp(void* mainPlayer) {
+    if (!mainPlayer || !R::IsLive(mainPlayer)) return false;
+    static CachedBool s_waking;
+    void* cls = R::ClassOf(mainPlayer);
+    if (cls != s_waking.cls || s_waking.mask == 0) {
+        int32_t b = -1; uint8_t m = 0;
+        if (!R::FindBoolProperty(cls, L"isWakingUp", b, m) || b < 0 || m == 0) return false;
+        s_waking.cls = cls; s_waking.byte = b; s_waking.mask = m;
+    }
+    return (reinterpret_cast<const uint8_t*>(mainPlayer)[s_waking.byte] & s_waking.mask) != 0;
 }
 
 bool SetMainPlayerRagdollMode(void* mainPlayer, bool ragdoll, bool passOut, bool death) {

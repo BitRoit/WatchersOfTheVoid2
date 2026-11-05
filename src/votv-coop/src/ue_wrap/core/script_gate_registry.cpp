@@ -11,10 +11,11 @@ bool Register(Entry* table, std::atomic<int>& count, int& keyed, std::uint64_t k
     for (int i = SlotOf(key), n = 0; n < kSlots; ++n, i = (i + 1) & (kSlots - 1)) {
         Entry& e = table[i];
         const std::uint64_t k = e.key.load(std::memory_order_relaxed);
-        // A dead entry keeps its literals for the settled question and is never enabled again: a re-watch of it
-        // takes a slot of its own, which dies the same way.
+        // Dead registrations retain their identity and refusal. Never consume
+        // another keyed slot for the same impossible watch on a later pump.
         if (k == key && e.tag == tag && e.pre == pre && e.post == post && e.name == name &&
-            e.className == className && !e.dead.load(std::memory_order_relaxed)) {
+            e.className == className) {
+            if (e.dead.load(std::memory_order_relaxed)) return false;
             if (enabled && !e.enabled.exchange(true, std::memory_order_release))
                 count.fetch_add(1, std::memory_order_release);
             return true;

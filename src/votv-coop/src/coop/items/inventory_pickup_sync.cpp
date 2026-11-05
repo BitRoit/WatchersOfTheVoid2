@@ -53,16 +53,11 @@ constexpr int kPocketTag = 0x504F434B;  // 'POCK'
 ue_wrap::script_gate::Verdict OnPocketPre(const ue_wrap::script_gate::Call& call) {
     auto* s = g_session.load(std::memory_order_acquire);
     if (!s || !s->connected()) return ue_wrap::script_gate::Verdict::Run;
-    const auto untracked=[&]{return coop::container_extract_recovery::InFlight() ?
-        ue_wrap::script_gate::Verdict::Cancel : ue_wrap::script_gate::Verdict::Run;};
-    if(!call.locals || !call.function)return untracked();
-    void* local = coop::players::Registry::Get().Local();
-    if (!local || call.object != local) return untracked();
 
     static ue_wrap::CachedObjRef s_fn;
     static int32_t s_inputOff = -1;
     static int32_t s_returnOff = -1;
-    if (!s_fn.Is(call.function)) {
+    if (call.function && !s_fn.Is(call.function)) {
         s_fn.Set(call.function);
         s_inputOff = R::FindParamOffset(call.function, L"InputPin");
         s_returnOff = R::FindParamOffset(call.function, L"return");
@@ -74,6 +69,20 @@ ue_wrap::script_gate::Verdict OnPocketPre(const ue_wrap::script_gate::Call& call
             UE_LOGW("inventory_pickup: %ls InputPin did not resolve -- mutable pocket state cannot be published",
                     kPocketVerb);
     }
+
+    const auto untracked = [&] {
+        if (coop::container_extract_recovery::InFlight()) {
+            if (s_returnOff >= 0 && call.locals) {
+                call.locals[s_returnOff] = 0;
+                if (uint8_t* out = ue_wrap::script_gate::OutParamPtr(call, s_returnOff)) *out = 0;
+            }
+            return ue_wrap::script_gate::Verdict::Cancel;
+        }
+        return ue_wrap::script_gate::Verdict::Run;
+    };
+    if(!call.locals || !call.function)return untracked();
+    void* local = coop::players::Registry::Get().Local();
+    if (!local || call.object != local) return untracked();
     if (s_inputOff < 0 || s_returnOff < 0) return untracked();
     const auto cancelPickup = [&] {
         // Cancel preserves out parameters. A reused caller frame may still hold

@@ -17,6 +17,10 @@ if($LASTEXITCODE -ne 0){throw 'Native ragdoll camera regression failed'}
 if($LASTEXITCODE -ne 0){throw 'Native ragdoll momentum regression failed'}
 & "$output/native.exe" transition
 if($LASTEXITCODE -ne 0){throw 'Native ragdoll construction/recovery transition failed'}
+& "$output/native.exe" impacts
+if($LASTEXITCODE -ne 0){throw 'Native ragdoll impact notification regression failed'}
+& "$output/native.exe" rapid
+if($LASTEXITCODE -ne 0){throw 'Native rapid recovery regression failed'}
 if($FaultControls){
     # Compile the actual substrate with its camera correction disabled. The same
     # regression must reject it; a positive-only camera test could be blind.
@@ -34,8 +38,10 @@ if($FaultControls){
     & cl /nologo /std:c++20 /EHsc /Gy /utf-8 "/I$checkout/src/votv-coop/include" `
         "/Fo$output/camera-disabled.obj" "/Fe$output/camera-disabled.exe" $testSource /link /OPT:REF
     if($LASTEXITCODE -ne 0){throw 'Camera negative control did not compile'}
+    $ErrorActionPreference='Continue'
     $controlOutput= & "$output/camera-disabled.exe" camera 2>&1
     $controlExit=$LASTEXITCODE
+    $ErrorActionPreference='Stop'
     $controlOutput | Set-Content -LiteralPath (Join-Path $output 'camera-disabled.log')
     if($controlExit -eq 0 -or ($controlOutput -join "`n") -notmatch 'cameraWrites==1'){
         throw 'Camera regression did not reject the removed correction for the expected reason'
@@ -53,8 +59,10 @@ if($FaultControls){
     & cl /nologo /std:c++20 /EHsc /Gy /utf-8 "/I$checkout/src/votv-coop/include" `
         "/Fo$output/momentum-disabled.obj" "/Fe$output/momentum-disabled.exe" $testSource /link /OPT:REF
     if($LASTEXITCODE -ne 0){throw 'Momentum negative control did not compile'}
+    $ErrorActionPreference='Continue'
     $controlOutput= & "$output/momentum-disabled.exe" momentum 2>&1
     $controlExit=$LASTEXITCODE
+    $ErrorActionPreference='Stop'
     $controlOutput | Set-Content -LiteralPath (Join-Path $output 'momentum-disabled.log')
     if($controlExit -eq 0 -or -not ($controlOutput -join "`n").Contains('velocities[1].X-600')){throw 'Momentum regression did not reject disabled command holding'}
     Write-Output 'PASS negative control: dropping native warmup commands is rejected'
@@ -73,11 +81,42 @@ if($FaultControls){
         & cl /nologo /std:c++20 /EHsc /Gy /utf-8 "/I$checkout/src/votv-coop/include" `
             "/Fo$output/$($control.Name)-disabled.obj" "/Fe$output/$($control.Name)-disabled.exe" $testSource /link /OPT:REF
         if($LASTEXITCODE -ne 0){throw 'Transition negative control did not compile'}
+        $ErrorActionPreference='Continue'
         $controlOutput=& "$output/$($control.Name)-disabled.exe" transition 2>&1
         $controlExit=$LASTEXITCODE
+        $ErrorActionPreference='Stop'
         $controlOutput | Set-Content -LiteralPath (Join-Path $output ($control.Name+'-disabled.log'))
         if($controlExit -eq 0 -or -not ($controlOutput -join "`n").Contains($control.Failure)){throw 'Transition regression did not reject missing native lifecycle correction'}
         Write-Output "PASS negative control: removed $($control.Name) correction is rejected"
+    }
+    $recovery=[regex]::Match($source,'(?ms)^void OnNativeRagdollArmAttached\(.*?^\}').Value
+    if(-not $recovery){throw 'Recovery position control site changed'}
+    $oldPosition=$recovery.Replace('FRotator view{};', 'FRotator view{}; FVector previousPosition{}; { ParamFrame p(R::FindDispatchFunctionCached(R::ClassOf(component),L"K2_GetComponentLocation")); if(Call(component,p))p.GetRaw(L"ReturnValue",&previousPosition,sizeof(previousPosition)); }')
+    $oldPosition=$oldPosition.Replace('L"K2_SetWorldRotation"','L"K2_SetWorldLocationAndRotation"').Replace('if (!restore.Set<FRotator>', 'if (!restore.Set<FVector>(L"NewLocation",previousPosition) || !restore.Set<FRotator>')
+    foreach($fault in @(
+        @{Name='impact-notifications';Find='if (localImpacts) {';Replace='if (false) {';Mode='impacts'},
+        @{Name='local-impact-admission';Find='StartBodySim(target, true)';Replace='StartBodySim(target)';Mode='transition'},
+        @{Name='recovery-phase';Find='if(!inRagdoll||flag(L"isWakingUp",false)){';Replace='if(false){';Mode='rapid';Failure='configurations==0'},
+        @{Name='recovery-old-position';Find=$recovery;Replace=$oldPosition;Mode='transition';Failure='armPosition.X==-beforePosition.Y'}
+    )){
+        $mutant=Join-Path $output ($fault.Name+'-disabled.cpp')
+        if(-not $source.Contains($fault.Find)){throw 'Impact fault site changed'}
+        [IO.File]::WriteAllText($mutant,$source.Replace($fault.Find,$fault.Replace))
+        $fixture=[IO.File]::ReadAllText((Join-Path $PSScriptRoot 'ragdoll_native_test.cpp'))
+        $fixture=$fixture.Replace('../../src/votv-coop/src/ue_wrap/engine/engine_playerragdoll.cpp',$mutant.Replace('\','/'))
+        $fixture=$fixture.Replace('../../src/votv-coop/src/ue_wrap/core/call.cpp',"$checkout/src/votv-coop/src/ue_wrap/core/call.cpp".Replace('\','/'))
+        $testSource=Join-Path $output ($fault.Name+'-disabled-test.cpp')
+        [IO.File]::WriteAllText($testSource,$fixture)
+        & cl /nologo /std:c++20 /EHsc /Gy /utf-8 "/I$checkout/src/votv-coop/include" "/Fo$output/$($fault.Name).obj" "/Fe$output/$($fault.Name).exe" $testSource /link /OPT:REF
+        if($LASTEXITCODE){throw 'Impact fault compile failed'}
+        $ErrorActionPreference='Continue'
+        $result=& "$output/$($fault.Name).exe" $fault.Mode 2>&1
+        $status=$LASTEXITCODE
+        $ErrorActionPreference='Stop'
+        $result | Set-Content -LiteralPath (Join-Path $output ($fault.Name+'.log'))
+        $failure=if($fault.Failure){$fault.Failure}else{'componentHits && allBodyHits'}
+        if($status -eq 0 -or -not ($result -join "`n").Contains($failure)){throw 'Ragdoll fault survived'}
+        Write-Output "PASS negative control: $($fault.Name) rejected"
     }
 }
 if($CompileSources){foreach($unit in @('ue_wrap/engine/engine_playerragdoll','coop/player/local_streams','coop/player/local_body')){

@@ -204,10 +204,13 @@ struct ScanStats {
 struct NearbyExclusion {
     void* const* actors = nullptr;
     size_t       count  = 0;
+    bool (*filter)(void* actor, void* ctx) = nullptr;
+    void*        filterCtx = nullptr;
 
     bool Holds(void* a) const {
         for (size_t i = 0; i < count; ++i)
             if (actors[i] == a) return true;
+        if (filter && filter(a, filterCtx)) return true;
         return false;
     }
 };

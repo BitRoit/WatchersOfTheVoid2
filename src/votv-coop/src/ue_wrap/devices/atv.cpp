@@ -5,6 +5,7 @@
 // is the physics body transform.
 
 #include "ue_wrap/devices/atv.h"
+#include "ue_wrap/devices/atv_rig_pose.h"
 
 #include "ue_wrap/actors/save_record.h" // the loaded world save's object records (Fstruct_save)
 #include "ue_wrap/core/call.h"      // ParamFrame / Call -- the GameplayStatics spawn (SpawnMirror)
@@ -13,6 +14,7 @@
 #include "ue_wrap/engine/engine.h"
 #include "ue_wrap/world/media_player.h"
 #include "ue_wrap/engine/engine_component.h"
+#include "ue_wrap/engine/engine_physics.h"
 #include "ue_wrap/core/fname_utils.h"
 #include "ue_wrap/core/log.h"
 #include "ue_wrap/core/object_index.h"
@@ -63,6 +65,7 @@ const wchar_t* const kModuleNames[8] = {
     L"module_floaties", L"module_front", L"module_radio", L"module_solar"
 };
 void* g_honkFn = nullptr;
+void* g_honkReleaseFn = nullptr;
 void* g_setBrakeFn = nullptr;   // applies the brake bool to the constraint
 void* g_loadLightsFn = nullptr; // applies the lights bool to the lamps
 void* g_setKeyFn = nullptr;
@@ -120,7 +123,9 @@ bool EnsureResolved() {
     g_radioCompOff = R::FindPropertyOffset(cls, L"radio");
     g_mapCompOff   = R::FindPropertyOffset(cls, L"digitalMap");
     for (int i = 0; i < 8; ++i) g_moduleOff[i] = R::FindPropertyOffset(cls, kModuleNames[i]);
-    g_honkFn = R::FindFunction(cls, L"InpActEvt_atv_honk_K2Node_InputActionEvent");
+    g_honkFn = R::FindFunction(cls, L"InpActEvt_atv_honk_K2Node_InputActionEvent_14");
+    if (!g_honkFn) g_honkFn = R::FindFunction(cls, L"InpActEvt_atv_honk_K2Node_InputActionEvent");
+    g_honkReleaseFn = R::FindFunction(cls, L"InpActEvt_atv_honk_K2Node_InputActionEvent_15");
     g_setBrakeFn = R::FindFunction(cls, L"setBrake");
     g_loadLightsFn = R::FindFunction(cls, L"loadLights");
     // setKey is often declared on the save parent, and FindFunction does not climb.
@@ -581,9 +586,16 @@ void ApplyModuleMask(void* atv, uint8_t mask) {
 }
 
 void PlayHonk(void* atv) {
-    if (!atv || !g_honkFn) return;
-    ParamFrame f(g_honkFn);
-    if (f.valid()) Call(atv, f);
+    if (!atv) return;
+    if (!g_honkFn && !EnsureResolved()) return;
+    if (g_honkFn) {
+        ParamFrame f(g_honkFn);
+        if (f.valid()) Call(atv, f);
+    }
+    if (g_honkReleaseFn) {
+        ParamFrame f(g_honkReleaseFn);
+        if (f.valid()) Call(atv, f);
+    }
 }
 
 bool EjectWheel(void* atv, int index) {
@@ -655,6 +667,127 @@ bool TeleportRig(void* atv, const FVector& loc, const FRotator& rot) {
     if (!f.valid()) return false;
     if (!f.Set<FVector>(L"NewLocation", target) || !f.Set<FRotator>(L"NewRotation", facing) || !current()) return false;
     return Call(atv, f) && current();
+}
+
+bool MatchRigPlanarVelocity(void* atv, const FVector& desired, FVector& before, int& writes) {
+    writes=0;before={};
+    if(!std::isfinite(desired.X)||!std::isfinite(desired.Y)||!atv||!EnsureResolved()||!R::IsLive(atv)||!IsAtv(atv))return false;
+    CachedObjRef actor,cls,parts[4],getters[4],setters[4];
+    actor.Set(atv);cls.Set(R::ClassOf(atv));
+    const auto generation=world_identity::Generation();void* world=world_identity::CurrentWorld();
+    const auto current=[&]{return actor.Get()&&cls.Get()&&world&&world_identity::CurrentWorld()==world&&
+        world_identity::Generation()==generation&&world_identity::WorldOf(atv)==world&&R::ClassOf(atv)==cls.Get();};
+    const wchar_t* const names[]={L"mesh",L"frontWheel_L",L"frontWheel_R",L"backWheelRoot"};
+    FVector velocities[4]{};
+    for(int i=0;i<4;++i){
+        if(!current())return false;
+        const int offset=R::FindPropertyOffset(cls.Get(),names[i]);if(offset<0)return false;
+        void* part=*reinterpret_cast<void**>(static_cast<uint8_t*>(atv)+offset);
+        if(!engine::IsPrimitiveComponent(part)||world_identity::WorldOf(part)!=world)return false;
+        parts[i].Set(part);
+        for(int j=0;j<i;++j)if(parts[j].Raw()==part)return false;
+        getters[i].Set(R::FindDispatchFunctionCached(R::ClassOf(part),L"GetPhysicsLinearVelocity"));
+        setters[i].Set(R::FindDispatchFunctionCached(R::ClassOf(part),L"SetPhysicsLinearVelocity"));
+        if(!getters[i].Get()||!setters[i].Get()||
+           R::FindParamSize(getters[i].Get(),L"ReturnValue")!=sizeof(FVector)||
+           R::FindParamSize(getters[i].Get(),L"BoneName")!=sizeof(R::FName)||
+           R::FindParamSize(setters[i].Get(),L"NewVel")!=sizeof(FVector)||
+           R::FindParamSize(setters[i].Get(),L"bAddToCurrent")!=sizeof(bool)||
+           R::FindParamSize(setters[i].Get(),L"BoneName")!=sizeof(R::FName))return false;
+        ParamFrame read(getters[i].Get()),write(setters[i].Get());
+        if(!read.valid()||!write.valid()||!read.Set(L"BoneName",R::FName{0,0})||
+           !write.Set(L"BoneName",R::FName{0,0})||!write.Set(L"bAddToCurrent",false)||
+           !write.Set(L"NewVel",FVector{})||!current()||!parts[i].Get()||
+           !Call(parts[i].Get(),read)||!current()||!parts[i].Get()||
+           !read.GetRaw(L"ReturnValue",&velocities[i],sizeof(FVector))||
+           !std::isfinite(velocities[i].X)||!std::isfinite(velocities[i].Y)||!std::isfinite(velocities[i].Z))return false;
+    }
+    before=velocities[0];
+    const FVector delta{desired.X-before.X,desired.Y-before.Y,0};
+    // Avoid waking an already matching rig for sub-resolution floating noise.
+    if(std::fabs(delta.X)<=0.01f&&std::fabs(delta.Y)<=0.01f)return true;
+    // Preflight every final frame before the first physics mutation.
+    ParamFrame frames[4]={ParamFrame(setters[0].Get()),ParamFrame(setters[1].Get()),ParamFrame(setters[2].Get()),ParamFrame(setters[3].Get())};
+    for(int i=0;i<4;++i){
+        velocities[i].X+=delta.X;velocities[i].Y+=delta.Y;
+        if(!std::isfinite(velocities[i].X)||!std::isfinite(velocities[i].Y)||!frames[i].valid()||
+           !frames[i].Set(L"NewVel",velocities[i])||!frames[i].Set(L"bAddToCurrent",false)||
+           !frames[i].Set(L"BoneName",R::FName{0,0}))return false;
+    }
+    for(int i=0;i<4;++i){
+        if(!current())return false;
+        for(int j=0;j<4;++j)if(!parts[j].Get()||!getters[j].Get()||!setters[j].Get())return false;
+        if(!Call(parts[i].Get(),frames[i]))return false;
+        ++writes;
+    }
+    for(int i=0;i<4;++i)if(!parts[i].Get()||!getters[i].Get()||!setters[i].Get())return false;
+    return current();
+}
+
+bool TeleportRigPreservingShape(void* atv, const FVector& loc, const FRotator& rot) {
+    if(!detail::RigFinite({loc,rot}) || !atv || !EnsureResolved() || !R::IsLive(atv) || !IsAtv(atv))return false;
+    CachedObjRef actor,cls,read,write;
+    actor.Set(atv);cls.Set(R::ClassOf(atv));
+    read.Set(R::FindDispatchFunctionCached(cls.Get(),L"vehicleGetParts"));
+    write.Set(R::FindDispatchFunctionCached(cls.Get(),L"teleportVehicleAdvanced"));
+    const auto generation=world_identity::Generation();void* world=world_identity::CurrentWorld();
+    const auto current=[&]{return actor.Get() && cls.Get() && read.Get() && write.Get() && world &&
+        generation==world_identity::Generation() && world==world_identity::CurrentWorld() &&
+        world_identity::WorldOf(atv)==world && R::ClassOf(atv)==cls.Get() &&
+        R::FindDispatchFunctionCached(cls.Get(),L"vehicleGetParts")==read.Get() &&
+        R::FindDispatchFunctionCached(cls.Get(),L"teleportVehicleAdvanced")==write.Get();};
+    const auto unavailable=[] {
+        static bool said=false;
+        if(!said){said=true;UE_LOGW("atv: shape-preserving correction unavailable -- require vehicleGetParts and teleportVehicleAdvanced with all eight native pose fields; rig left untouched (no construction-marker fallback)");}
+        return false;
+    };
+    if(!current())return unavailable();
+    ParamFrame source(read.Get()),destination(write.Get());
+    if(!source.valid() || !destination.valid())return unavailable();
+    const wchar_t* const locations[]={L"body_location",L"frontLeft_location",L"frontRight_location",L"back_location"};
+    // The getter really omits the underscore in frontLeftrotation; the setter does not.
+    const wchar_t* const rotations[]={L"body_rotation",L"frontLeftrotation",L"frontRight_rotation",L"back_rotation"};
+    const wchar_t* const targetRotations[]={L"body_rotation",L"frontLeft_rotation",L"frontRight_rotation",L"back_rotation"};
+    detail::RigPartPose parts[4]{};
+    // Preflight both frames before the read dispatch. Missing/truncated fields
+    // cannot become silent zero-valued parts or a partially written native move.
+    for(int i=0;i<4;++i)
+        if(R::FindParamSize(read.Get(),locations[i])!=sizeof(FVector) ||
+           R::FindParamSize(read.Get(),rotations[i])!=sizeof(FRotator) ||
+           R::FindParamSize(write.Get(),locations[i])!=sizeof(FVector) ||
+           R::FindParamSize(write.Get(),targetRotations[i])!=sizeof(FRotator) ||
+           !source.GetRaw(locations[i],&parts[i].pos,sizeof(FVector)) ||
+           !source.GetRaw(rotations[i],&parts[i].rot,sizeof(FRotator)) ||
+           !destination.Set(locations[i],parts[i].pos) || !destination.Set(targetRotations[i],parts[i].rot))return unavailable();
+    if(!current() || !Call(atv,source) || !current())return false;
+    for(int i=0;i<4;++i)
+        if(!source.GetRaw(locations[i],&parts[i].pos,sizeof(FVector)) ||
+           !source.GetRaw(rotations[i],&parts[i].rot,sizeof(FRotator)))return unavailable();
+    const float beforeRide=parts[0].pos.Z-(parts[1].pos.Z+parts[2].pos.Z+parts[3].pos.Z)/3.f;
+    if(!detail::RebaseRigPose(parts,{loc,rot}))return false;
+    for(int i=0;i<4;++i)
+        if(!destination.Set(locations[i],parts[i].pos) || !destination.Set(targetRotations[i],parts[i].rot))return unavailable();
+    if(!current() || !Call(atv,destination) || !current())return false;
+    // Observe the native result, not merely the accepted dispatch. This is
+    // especially useful when diagnosing a rig whose root height looks correct.
+    detail::RigPartPose observed[4]{};
+    bool verified=Call(atv,source) && current();
+    if(!current())return false; // the readback can retire/recycle the captured actor too
+    for(int i=0;i<4 && verified;++i)
+        verified=source.GetRaw(locations[i],&observed[i].pos,sizeof(FVector)) &&
+            source.GetRaw(rotations[i],&observed[i].rot,sizeof(FRotator)) && detail::RigFinite(observed[i]);
+    float afterRide=-1.f,maxPoseError=-1.f;
+    if(verified){
+        afterRide=observed[0].pos.Z-(observed[1].pos.Z+observed[2].pos.Z+observed[3].pos.Z)/3.f;
+        maxPoseError=0.f;
+        for(int i=0;i<4;++i){
+            const FVector d{observed[i].pos.X-parts[i].pos.X,observed[i].pos.Y-parts[i].pos.Y,observed[i].pos.Z-parts[i].pos.Z};
+            maxPoseError=std::max(maxPoseError,std::sqrt(d.X*d.X+d.Y*d.Y+d.Z*d.Z));
+        }
+    }
+    UE_LOGI("[ATVR] key='%ls' advanced=1 readback=%d rideHBefore=%.2f rideHAfter=%.2f maxPoseError=%.3f",
+        GetKeyString(atv).c_str(),verified,beforeRide,afterRide,maxPoseError);
+    return current();
 }
 
 const char* SpawnFailText(SpawnFail why) {

@@ -1,6 +1,11 @@
-#include "../../src/votv-coop/src/coop/world/balance_sync.cpp"
+#ifndef BALANCE_SYNC_SOURCE
+#define BALANCE_SYNC_SOURCE "../../src/votv-coop/src/coop/world/balance_sync.cpp"
+#endif
+#include BALANCE_SYNC_SOURCE
 #include <cassert>
 #include <cstdio>
+#include <cstdlib>
+#define CHECK(x) do{if(!(x)){std::fprintf(stderr,"FAIL %d: %s\n",__LINE__,#x);std::exit(1);}}while(0)
 #include <functional>
 #include <limits>
 #include <vector>
@@ -72,5 +77,36 @@ int main(){
     Reset(s);B::CreditLocal(10);++world;Drain();assert(credits==0&&points==100);
     Reset(s);B::CreditLocal(10);Drain();assert(credits==1&&points==110);
     B::OnDisconnect();B::CreditLocal(5);Drain();assert(points==115);
+    // Actual production orchestration: Install/SetSession runs before every
+    // gameplay Tick, not just once at connection. Stable recipients get one row.
+    Reset(s);
+    for(int frame=0;frame<600;++frame){B::SetSession(&s);B::Tick();}
+    CHECK(s.sent.size()==2);
+    points=222;B::SetSession(&s);B::Tick();assert(s.sent.size()==4);
+    s.ready[3]=true;s.generation[3]=3;B::SetSession(&s);B::Tick();assert(s.sent.size()==5);
+    ++s.generation[1];B::SetSession(&s);B::Tick();assert(s.sent.size()==6);
+    // Explicit client-world reload replay still forces the unchanged state.
+    B::SendCurrentToSlot(1);assert(s.sent.size()==7);
+    // Same address, new session serial must reset the delivery ledger.
+    ++serial;B::SetSession(&s);B::Tick();assert(s.sent.size()==10);
+    ++world;B::SetSession(&s);B::Tick();assert(s.sent.size()==13);
+    // Refused recipients retain debt while the successful one stays settled.
+    Reset(s);s.allowed[1]=false;
+    for(int frame=0;frame<60;++frame){B::SetSession(&s);B::Tick();}
+    assert(s.sent.size()==1&&s.sent[0].slot==2);
+    s.allowed[1]=true;B::SetSession(&s);B::Tick();assert(s.sent.size()==2);
+    // Per-frame installs must not erase a pending client native/HUD retry.
+    Reset(s,Role::Client);writable=false;B::ApplyFromHost(333);
+    for(int frame=0;frame<60;++frame){B::SetSession(&s);B::Tick();}
+    assert(writes==0);writable=true;B::SetSession(&s);B::Tick();assert(points==333&&writes==1);
+    for(int frame=0;frame<60;++frame){B::SetSession(&s);B::Tick();}
+    assert(writes==1);
+    Reset(s,Role::Client);writable=false;B::ApplyFromHost(444);
+    ++world;B::SetSession(&s);writable=true;B::Tick();assert(writes==0);
+    B::ApplyFromHost(555);++serial;B::SetSession(&s);B::Tick();assert(writes==0);
+    B::ApplyFromHost(666);B::OnDisconnect();B::SetSession(&s);B::Tick();assert(writes==0);
+    Reset(s);B::Tick();coop::net::Session replacement;B::SetSession(&replacement);B::Tick();
+    assert(replacement.sent.size()==2);
+    puts("PASS repeated production install polls retain balance delivery and pending native state; changes/replay/occupant/session/world rearm correctly");
     puts("PASS balance per-peer delivery/retry, static joins/refusals, signed totals, latest HUD update, reentry, world/session/occupant replacement and deferred credit cancellation across world/session changes");
 }

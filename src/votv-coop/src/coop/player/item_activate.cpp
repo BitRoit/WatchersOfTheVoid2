@@ -272,7 +272,7 @@ bool PublishState(void* self) {
     const auto hash=SignaturePayload(p),sig=hash==kNoSendYet?kNoSendYet-1:hash;
     if(g_publishing && g_inflightSig==sig)return false;
     if(g_lastSentSig.load()==sig)return true;
-    if(p.state && p.intensity>1.f)g_latchedOnIntensity=p.intensity;
+    if(p.state && p.intensity>0.01f)g_latchedOnIntensity=p.intensity;
     const auto revision=++g_sendRevision;
     const bool previousBusy=g_publishing;const auto previousSig=g_inflightSig;
     g_publishing=true;g_inflightSig=sig;
@@ -544,33 +544,53 @@ bool ApplyToPuppet(void* puppetActor, const coop::net::ItemActivatePayload& inco
     bool applied = true;
     if(!current())return false;
 
+    // A native component rebuild can replace the light after puppet spawn. Reassert its world-space
+    // attachment rule while applying an already-authoritative flashlight state; this is not part of
+    // the state verdict, so an unavailable SetAbsolute keeps the older presentation fallback alive.
+    ue_wrap::engine::SetComponentAbsolute(light_R, true, true, false);
+    if (!current()) return false;
+
     // The four dispatches go through the cached engine wrappers.
 
-    // 1) SetVisibility: marks the render state dirty on the first transition, which creates the
-    // proxy on the orphan puppet.
-    if (!ue_wrap::engine::SetSceneComponentVisibility(light_R, newState, false)) {
-        applied = false;
-        UE_LOGW("flashlight: SetSceneComponentVisibility failed (UFunction unresolved or light_R dead)");
-    }
-    if (!current()) return false;
-
-    // 2) SetIntensity: the sender's exact brightness; off is 0.
+    // 1) SetIntensity: the sender's exact brightness; off is 0.
+    // Crucial for UE4: ULightComponent::ShouldComponentAddToScene() requires Intensity > 0.f
+    // to build the FSceneProxy render proxy when visibility is toggled on. Setting intensity > 0
+    // before toggling visibility ensures the scene proxy is constructed.
     const float targetIntensity = newState ? payload.intensity : 0.f;
-    if (!ue_wrap::engine::SetLightIntensity(light_R, targetIntensity)) {
-        applied = false;
-        UE_LOGW("flashlight: SetLightIntensity failed (UFunction unresolved or light_R dead)");
-    }
-    if (!current()) return false;
-
-    // 3) The cone angles (spread versus focused); both mark the render state dirty. Only when on: a
-    // cone on an off light is invisible.
     if (newState) {
+        ue_wrap::engine::SetLightCastShadows(light_R, false);
+        if (!current()) return false;
+        ue_wrap::engine::SetLightAttenuationRadius(light_R, 5000.0f);
+        if (!current()) return false;
+        if (!ue_wrap::engine::SetLightIntensity(light_R, targetIntensity)) {
+            applied = false;
+            UE_LOGW("flashlight: SetLightIntensity failed (UFunction unresolved or light_R dead)");
+        }
+        if (!current()) return false;
+
         if (payload.outerConeAngle > 0.f) {
             applied = ue_wrap::engine::SetSpotLightOuterConeAngle(light_R, payload.outerConeAngle) && applied;
             if (!current()) return false;
         }
         if (payload.innerConeAngle >= 0.f) {
             applied = ue_wrap::engine::SetSpotLightInnerConeAngle(light_R, payload.innerConeAngle) && applied;
+        }
+        if (!current()) return false;
+
+        if (!ue_wrap::engine::SetSceneComponentVisibility(light_R, true, false)) {
+            applied = false;
+            UE_LOGW("flashlight: SetSceneComponentVisibility failed (UFunction unresolved or light_R dead)");
+        }
+    } else {
+        if (!ue_wrap::engine::SetSceneComponentVisibility(light_R, false, false)) {
+            applied = false;
+            UE_LOGW("flashlight: SetSceneComponentVisibility failed (UFunction unresolved or light_R dead)");
+        }
+        if (!current()) return false;
+
+        if (!ue_wrap::engine::SetLightIntensity(light_R, 0.f)) {
+            applied = false;
+            UE_LOGW("flashlight: SetLightIntensity failed (UFunction unresolved or light_R dead)");
         }
     }
 

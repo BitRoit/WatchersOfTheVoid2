@@ -34,6 +34,7 @@ enum class ClientAuthorship : uint8_t { Client, Host, NotAKind };
 
 constexpr ClientAuthorship AuthorshipOf(ReliableKind k) {
     switch (k) {
+    case ReliableKind::MannequinSight: // direction/opcode validated in mannequin_sight_sync
     case ReliableKind::Join:
     case ReliableKind::PropRelease:
     case ReliableKind::PropSpawn:

@@ -13,6 +13,7 @@
 #include "coop/element/element.h"
 #include "coop/element/quiescence_drain.h"  // SupersedePosCorrection: the own release is the newest pose
 #include "coop/element/registry.h"          // EidForActor: the keyed eid of the released prop
+#include "coop/creatures/mannequin_identity.h"
 #include "coop/config/config.h"
 #include "coop/creatures/kerfur_entity.h"  // GetKerfurMirrorEidForActor, the held kerfur prop's eid
 #include "coop/creatures/npc_sync.h"       // KerfurIsHolding: a take is not a throw
@@ -125,9 +126,11 @@ bool ReadLocalPose(void* local, void* controller, coop::net::PoseSnapshot& out) 
     // death is excluded by `dead`. One wrapper read.
     {
         bool isRagdoll = false, dead = false;
-        if (ue_wrap::engine::ReadMainPlayerRagdollState(local, isRagdoll, dead) && !dead &&
-            (isRagdoll || ue_wrap::engine::GetLocalRagdollBodyMesh(local))) {
-            out.stateBits |= coop::net::kStateBitRagdoll;
+        if (ue_wrap::engine::ReadMainPlayerRagdollState(local, isRagdoll, dead) && !dead) {
+            void* bodyMesh = ue_wrap::engine::GetLocalRagdollBodyMesh(local);
+            if (isRagdoll && bodyMesh && !ue_wrap::engine::ReadMainPlayerIsWakingUp(local)) {
+                out.stateBits |= coop::net::kStateBitRagdoll;
+            }
         }
     }
     if ((out.stateBits & coop::net::kStateBitRagdoll) == 0 &&
@@ -355,7 +358,9 @@ void Tick(coop::net::Session& session, void* local, void* controller) {
             // eid and chipType, and this edge consumes it and broadcasts the ToClump convert.
             // EnsureHeldItemBroadcast is false for a clump; an Aprop_C is broadcast as a fresh
             // keyed prop. The wire eid resolves once here and is cached for the carry.
-            const bool mirrored = coop::trash_collect_sync::EnsureHeldItemBroadcast(heldActor, &session);
+            uint32_t canonicalWalkerEid=0;std::wstring canonicalWalkerKey;
+            const bool canonicalWalker=coop::mannequin_identity::TryGetHeldIdentity(session,heldActor,canonicalWalkerEid,canonicalWalkerKey);
+            const bool mirrored = !canonicalWalker&&coop::trash_collect_sync::EnsureHeldItemBroadcast(heldActor, &session);
             // The host's grab adoption: the clump's identity is its birth certificate (every clump
             // is born from a chipPile, on an E-press or a use-hold alike). An existing tracked
             // clump re-entering the hand resolves by the tracker. A "no certificate mid-carry means
@@ -395,7 +400,7 @@ void Tick(coop::net::Session& session, void* local, void* controller) {
                 }
             }
             if (!churnRegrab)
-                g_lastHeldEid = (adoptedEid != coop::element::kInvalidId) ? adoptedEid
+                g_lastHeldEid = canonicalWalker ? canonicalWalkerEid : (adoptedEid != coop::element::kInvalidId) ? adoptedEid
                                                                           : ResolveHeldPropEid(heldActor);
             // A new hold, and a new generation for it -- except the game's churn re-grab of the
             // entity this peer is carrying, which is the same carry in a new clump actor: no
@@ -435,7 +440,11 @@ void Tick(coop::net::Session& session, void* local, void* controller) {
         }
         // The held world transform: key (None for the clump) and eid; the receiver resolves by key,
         // then eid.
-        const std::wstring keyW = ue_wrap::prop::GetInteractableKeyString(heldActor);
+        std::wstring keyW = ue_wrap::prop::GetInteractableKeyString(heldActor);
+        uint32_t canonicalWalkerEid=0;std::wstring canonicalWalkerKey;
+        if(coop::mannequin_identity::TryGetHeldIdentity(session,heldActor,canonicalWalkerEid,canonicalWalkerKey)){
+            g_lastHeldEid=canonicalWalkerEid;keyW=canonicalWalkerKey;
+        }
         coop::net::PropPoseSnapshot pp{};
         pp.key.len = 0;
         for (size_t i = 0; i < keyW.size() && i < 31; ++i) {

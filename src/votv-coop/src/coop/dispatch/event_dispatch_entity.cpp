@@ -13,6 +13,7 @@
 #include "coop/player/item_activate.h"
 #include "coop/session/join_progress.h"
 #include "coop/creatures/npc_mirror.h"
+#include "coop/creatures/mannequin_sight_sync.h"
 #include "coop/creatures/owner_entity_sync.h"
 #include "coop/items/hook_anchor.h"
 #include "coop/items/hook_sync.h"  // the hook lane
@@ -50,6 +51,12 @@ bool HandleEntityEvent(net::Session& session,
                        void* localPlayer) {
     (void)session;
     switch (msg.kind) {
+    case net::ReliableKind::MannequinSight: {
+        if(msg.payloadLen!=sizeof(net::MannequinSightPayload))return true;
+        net::MannequinSightPayload p{};std::memcpy(&p,msg.payload,sizeof(p));
+        mannequin_sight_sync::Receive(session,p,msg.senderPeerSlot);
+        return true;
+    }
     case net::ReliableKind::PropScaleState: {
         if(msg.payloadLen!=sizeof(net::PropScaleStatePayload))return true;
         net::PropScaleStatePayload p{};std::memcpy(&p,msg.payload,sizeof(p));
@@ -638,6 +645,13 @@ bool HandleEntityEvent(net::Session& session,
                     static_cast<size_t>(msg.payloadLen), sizeof(net::PyramidGatherPayload));
             break;
         }
+        if (msg.payloadLen == sizeof(net::PyramidGatherStatePayload)) {
+            net::PyramidGatherStatePayload state{};
+            std::memcpy(&state, msg.payload, sizeof(state));
+            ue_wrap::game_thread::Post([state] { ::coop::piramid_sync::OnPyramidGatherState(state); });
+            break;
+        }
+        if (msg.payloadLen != sizeof(net::PyramidGatherPayload)) break;
         net::PyramidGatherPayload pGather{};
         std::memcpy(&pGather, msg.payload, sizeof(pGather));
         ue_wrap::game_thread::Post([pGather] {

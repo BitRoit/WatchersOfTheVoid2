@@ -23,11 +23,20 @@ void* GetStaticMeshComponent(void* actor);
 // fight the pose drive. Game thread.
 bool SetComponentTickEnabled(void* component, bool enabled);
 
+// UActorComponent::Deactivate; halts internal simulation and registration. Game thread.
+bool DeactivateComponent(void* component);
+
 // UActorComponent::IsComponentTickEnabled; false when it does not read. Game thread.
 bool IsComponentTickEnabled(void* component);
 
 // USceneComponent world location (K2_GetComponentLocation) and forward vector; (0,0,0) on failure.
 FVector GetComponentLocation(void* component);
+
+// USceneComponent::SetAbsolute. An absolute axis retains its world-space transform instead of
+// being recomposed whenever its attach parent moves. False if the component is not live, the
+// UFunction is unavailable, a parameter cannot be framed, or the dispatch fails. Game thread.
+bool SetComponentAbsolute(void* sceneComponent, bool absLoc = true, bool absRot = true,
+                          bool absScale = false);
 
 // The same read that says when it did not happen: false on a null component or a call that failed, `out` then the
 // world origin, an ordinary position the caller must not mistake for a place. Game thread.

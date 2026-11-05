@@ -61,6 +61,7 @@ Desc g_descs[] = {
     { L"kitchen_C",        L"Active",       nullptr, nullptr, L"upd",       nullptr, nullptr   },
     { L"serverBox_C",      L"active",       nullptr, nullptr, L"visual",    nullptr, L"active" },
     { L"wallunit_tapes_C", L"Active",       nullptr, nullptr, L"upd",       nullptr, nullptr   },
+    { L"prop_roomba_C",    L"active",       nullptr, nullptr, L"activate",  L"upd",  nullptr   },
     // Kitchen machines have timers, cooking or consumable state and live on kitchen_sync,
     // not this symmetric one-bool lane. Their verbs must never be replayed on every peer.
 };
@@ -214,6 +215,10 @@ bool ApplyState(void* a, bool on) {
     if (void* const fn2 = d->applyFn2 ? Verb(a, d->applyFn2) : nullptr) {
         ParamFrame f2(fn2);
         if (f2.valid()) Call(a, f2);
+    }
+    if (void* const soundFn = Verb(a, L"sound")) {
+        ParamFrame fs(soundFn);
+        if (fs.valid() && fs.Set<bool>(L"active", on)) Call(a, fs);
     }
     return ok;
 }

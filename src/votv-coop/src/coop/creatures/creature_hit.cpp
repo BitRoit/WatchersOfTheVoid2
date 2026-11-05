@@ -23,7 +23,14 @@ bool IsCreature(void* actor) {
 }
 
 bool IsDelivered(void* actor) {
-    return IsCreature(actor) && coop::npc_mirror_brain::IsParkedClass(R::ClassOf(actor));
+    if (!actor || !R::IsLive(actor)) return false;
+    if (IsCreature(actor) && coop::npc_mirror_brain::IsParkedClass(R::ClassOf(actor)))
+        return true;
+    // These native projectiles are host-owned; client copies never execute their damage graph.
+    // Match exact verified leaves, never arbitrary Actor/Character ancestry.
+    const auto& name = R::NameOf(R::ClassOf(actor));
+    return R::NameEquals(name, L"hoelUfoAttack_C") ||
+           R::NameEquals(name, L"tentacleBallShot_C") || R::NameEquals(name, L"kavotiaShot_C");
 }
 
 }  // namespace coop::creature_hit

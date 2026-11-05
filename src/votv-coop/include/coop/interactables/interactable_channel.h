@@ -81,6 +81,9 @@ struct Adapter {
     // Opt in only for absolute setters whose failure means temporary unreadiness,
     // not a deliberate gameplay refusal (e.g. locked containers).
     bool retryFailedApply = false;
+    // Placed light switches/roots can have no save Key but still have a cooked
+    // level/child-component identity. Other families retain their native-key gate.
+    bool allowKeylessPortableIdentity = false;
 };
 
 // The engine.
@@ -393,9 +396,10 @@ public:
     // the save does not persist; coop/element/portable_identity.h); empty when it has neither.
     std::wstring KeyOf(void* obj) const {
         std::wstring key = a_.GetKey(obj);
-        if (key.empty() || key == L"None") return std::wstring();
+        const bool hasKey = !key.empty() && key != L"None";
+        if (!hasKey && !a_.allowKeylessPortableIdentity) return std::wstring();
         std::wstring portable = coop::element::PortableWireKey(obj);
-        return portable.empty() ? key : portable;
+        return portable.empty() ? (hasKey ? key : std::wstring()) : portable;
     }
 
     // The key this channel indexes the actor under, or "" when not indexed yet. The send side uses

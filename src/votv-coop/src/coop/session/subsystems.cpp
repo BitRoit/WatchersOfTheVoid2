@@ -30,6 +30,7 @@
 #include "coop/interactables/sat_console_sync.h"  // the SAT console's shared commands run on the host
 #include "coop/interactables/tape_caddy_sync.h"
 #include "coop/world/daily_task_sync.h"
+#include "coop/interactables/atv_authority.h"
 #include "coop/interactables/device_occupancy.h"
 #include "coop/interactables/notebook_sync.h"
 #include "coop/world/email_sync.h"
@@ -57,6 +58,8 @@
 #include "coop/props/water_pour_sync.h"
 #include "coop/props/prop_record_refresh.h"  // a drive box or reel case republishes its record in place
 #include "coop/interactables/signal_catch_sync.h"
+#include "ue_wrap/devices/garage.h"
+#include "ue_wrap/devices/roomba.h"
 #include "coop/interactables/signal_sync.h"
 #include "coop/player/movement_ledger.h"
 #include "coop/player/run_end_travel.h"
@@ -391,6 +394,9 @@ void Install(coop::net::Session& session) {
     coop::garbage_sync::Install();  // garbage
     coop::dev::dev_lanes::Install(session);  // [dev] the drills', probes' and selftests' installs (each a no-op unless its knob is set)
     coop::host_spawn_watcher::Install(&session);  // HOST mirrors the ambient spawner outputs (the pinecone scare) the line above cancels on the client -- BeginDeferred POST -> PropSpawn-by-eid
+    ue_wrap::garage::Install();
+    ue_wrap::roomba::Install();
+    ue_wrap::roomba::SetClientRole(session.role() == coop::net::Role::Client);
     coop::prop_spawn_authoring::Install(session.role() == coop::net::Role::Client);  // CLIENT: the script-gate bracket that tells a PLAYER's spawn (menu / toolgun) from the world's own -- read by the seam below
     coop::prop_drop_intent::Install(&session);  // CLIENT FinishSpawn post-hook (chains after host_spawn_watcher's) -> place detect -> host DROP INTENT
     coop::prop_action_sync::Install(&session);
@@ -630,7 +636,8 @@ void DisconnectSlot(coop::net::Session& session, int slot) {
     coop::wisp_tear_mirror::OnPeerLeft(static_cast<uint8_t>(slot));
     coop::remote_prop::OnDisconnectForSlot(slot);
     coop::item_activate::OnDisconnectForSlot(slot);
-    coop::device_occupancy::OnDisconnectForSlot(slot);  // release a leaver's device claims
+    coop::device_occupancy::OnDisconnectForSlot(slot);
+    coop::atv_authority::OnDisconnectForSlot(slot);  // release a leaver's device claims
     coop::sit_pose::OnPeerLeft(static_cast<uint8_t>(slot));
     coop::desk_input_sync::OnPeerLeft(slot);  // clear a leaver's dangling coordIsPing (its ping would swallow every peer's desk keys)
     coop::laptop_sync::OnPeerLeft(slot);  // discard unsent PC power/late-join state for a reused slot
@@ -760,6 +767,7 @@ DisconnectStats DisconnectAll() {
     coop::hook_sync::OnDisconnect();  // same, for every hook mirror, anchored included
     coop::placed_save_sync::OnDisconnect();
     coop::garden_actions::OnDisconnect();
+    coop::mannequin_sync::OnDisconnect();
     coop::skin_preview::OnDisconnect();  // despawn the F1-skins mannequin
     coop::inventory_pickup_sync::OnDisconnect();
     coop::chat_sync::OnDisconnect();
@@ -833,6 +841,7 @@ DisconnectStats DisconnectAll() {
     coop::balance_sync::OnDisconnect();  // reset the balance broadcast dedup
     coop::credit_intent::OnDisconnect();
     coop::props::prop_food_sync::OnDisconnect();
+    ue_wrap::roomba::SetClientRole(false);
     // Last, after every element drain: the client's transfer state, its received identity map and
     // the ephemeral zcoop_<pid> slot the join wrote. The map's binds resolve against Elements, so
     // it must outlive their drain; the slot file is read once at the join and never again, and a
@@ -870,6 +879,9 @@ void TickGameplay(coop::net::Session& session, bool isConnected, bool isHost,
     { PP::Scope _s{PP::Bucket::Interactable};
       coop::prop_element_tracker::InstallReseedScanConsumer();
       coop::prop_element_tracker::DrainReseedQueue(); }
+    // Keep subsystem pumps every frame: several Tick functions advance/apply
+    // client interpolation or sample the authoritative clock. Their existing
+    // elapsed-time guards limit background polling without throttling rendering.
     { PP::Scope _s{PP::Bucket::Interactable}; ue_wrap::ScopedWalkTimer _w{"sync:interactable"}; coop::interactable_sync::Tick(); }  // retry deferred door/light/container applies (still streaming in)
     { PP::Scope _s{PP::Bucket::Interactable}; ue_wrap::ScopedWalkTimer _w{"sync:keypad"}; coop::keypad_sync::Tick(); }  // a keypad state that arrived before its keypad was indexed
     { PP::Scope _s{PP::Bucket::Interactable}; ue_wrap::ScopedWalkTimer _w{"sync:time"}; coop::time_sync::Tick(); }  // the world clock: the host hands the net thread a sample when one is due; the client applies at its cycle's own tick
@@ -894,6 +906,7 @@ void TickGameplay(coop::net::Session& session, bool isConnected, bool isHost,
     coop::grayboar_actions::Tick();
     coop::grayboar_turn::Tick();
     coop::kavotia_sync::Tick();
+    coop::mannequin_sync::Tick(session);
     { PP::Scope _s{PP::Bucket::Interactable}; ue_wrap::ScopedWalkTimer _w{"sync:cord_sync"}; coop::cord_sync::Tick(); }
     { PP::Scope _s{PP::Bucket::Interactable}; ue_wrap::ScopedWalkTimer _w{"sync:prop_support_sync"}; coop::prop_support_sync::Tick(session); }
     { PP::Scope _s{PP::Bucket::Interactable}; ue_wrap::ScopedWalkTimer _w{"sync:gravity_motion"}; coop::gravity_motion::Tick(session); }

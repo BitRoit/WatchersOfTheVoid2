@@ -106,10 +106,9 @@ int RunPreCbSEH(PreNativeCallback cb, void* context, void* src, const uint8_t* p
 // Thread-local, though native dispatch is game-thread anyway.
 //
 // The guard is GLOBAL across ALL slots, not per-slot, so a hooked native dispatched from
-// inside another slot's callback would have its own callback skipped too. That is safe only
-// while no callback dispatches a hooked native synchronously -- sequential Blueprint bytecode
-// steps are not nested, since the first callback returns and clears the flag before the next
-// step runs. Preserve that when adding a callback, or make the guard per-slot.
+// inside another slot's callback has its own callback skipped too. Returning pre hooks use
+// this deliberately for one replacement dispatch; callbacks must not depend on any other
+// hook callback running inside that dispatch. Sequential Blueprint steps are not nested.
 thread_local bool t_inCb = false;
 
 // The frame and the result storage of the call the running callback reports, published for
@@ -186,7 +185,8 @@ template <int N>
 void __fastcall PreThunk(void* context, void* stack, void* result) {
     Slot& s = g_slots[N];
     // Armed, a call off the game thread forwards untouched: the callbacks are game-thread code.
-    if (!s.armed.load(std::memory_order_relaxed) || t_inCb || !stack || !ue_wrap::game_thread::IsGameThread()) {
+    if (!s.armed.load(std::memory_order_relaxed) || t_inCb || !stack ||
+        (s.resultBytes > 0 && !result) || !ue_wrap::game_thread::IsGameThread()) {
         s.original(context, stack, result);
         return;
     }
@@ -225,7 +225,10 @@ void __fastcall PreThunk(void* context, void* stack, void* result) {
     t_frame = CallerFrame{ReadPtr(stack, P::off::FFrame_Node),
                           static_cast<uint8_t*>(ReadPtr(stack, P::off::FFrame_Locals))};
     t_nativeFunction = s.ufunction;
+    t_result = s.resultBytes > 0 ? result : nullptr;
+    if (t_result) std::memset(t_result, 0, static_cast<size_t>(s.resultBytes));
     const int rc = RunPreCbSEH(s.pre, context, srcObj, parms, &verdict);
+    t_result = nullptr;
     t_nativeFunction = nullptr;
     t_frame = CallerFrame{nullptr, nullptr};
     t_inCb = false;
@@ -279,18 +282,27 @@ NativeFuncPtr* FuncSlotOf(void* ufunction) {
 }
 
 // The parameters a pre hook steps, into `into`; false with one line naming the first one it cannot.
-bool ReadPreSignature(void* ufunction, Slot& into) {
-    int count = 0;
+bool ReadPreSignature(void* ufunction, Slot& into, int32_t returnBytes = 0) {
+    if (returnBytes < 0 || returnBytes > 8) return false;
+    int count = 0, returns = 0;
     for (const auto& p : R::FunctionParams(ufunction)) {
         const char* why = nullptr;
         const int32_t written = p.size > 4 ? p.size : 4;   // a bool is written as four bytes
-        if (p.flags & P::cpf::ReturnParm) why = "a return value, which a refused call would leave unwritten";
+        if (p.flags & P::cpf::ReturnParm) {
+            if (!returnBytes) why = "a return value, which a refused call would leave unwritten";
+            else if (++returns != 1 || p.size != returnBytes || !(p.flags & P::cpf::NoDestructor) ||
+                     (p.flags & P::cpf::ReferenceParm) ||
+                     p.offset < 0 || p.offset > kPreFrameBytes - kPreFrameSlack - p.size)
+                why = "not a single bounded POD return of the opted-in size";
+            if (!why) continue; // Return storage is separate; never step it as an input.
+        }
         else if ((p.flags & P::cpf::OutParm) && (p.flags & kConstRef) != kConstRef)
             why = "an out parameter, or a reference that is not const";
         else if (!(p.flags & P::cpf::NoDestructor))
             why = "a parameter the engine destroys (a raw frame cannot)";
-        else if (count >= kMaxPreParams || p.offset < 0 ||
-                 p.offset + written + kPreFrameSlack > kPreFrameBytes)
+        else if (count >= kMaxPreParams || p.size <= 0 || p.offset < 0 ||
+                 written > kPreFrameBytes - kPreFrameSlack ||
+                 p.offset > kPreFrameBytes - kPreFrameSlack - written)
             why = "past the forwarder's frame";
         if (why) {
             UE_LOGE("ufunction_hook: pre hook on ufn=%p refused: '%ls' (flags 0x%llX) is %s", ufunction,
@@ -299,7 +311,9 @@ bool ReadPreSignature(void* ufunction, Slot& into) {
         }
         into.paramOffsets[count++] = static_cast<int16_t>(p.offset);
     }
+    if (returnBytes && returns != 1) return false;
     into.paramCount = count;
+    into.resultBytes = returnBytes;
     return true;
 }
 
@@ -377,10 +391,11 @@ bool InstallPostHookFn(void* ufunction, PostNativeCallback cb, bool armed) {
     return true;
 }
 
-bool InstallPreHookFn(void* ufunction, PreNativeCallback cb, bool armed) {
+bool InstallPreHookFn(void* ufunction, PreNativeCallback cb, bool armed, int32_t returnBytes = 0) {
     if (!ufunction || !cb) return false;
     for (int i = 0; i < g_slotCount; ++i) {
-        if (g_slots[i].ufunction == ufunction && g_slots[i].pre == cb) return true;
+        if (g_slots[i].ufunction == ufunction && g_slots[i].pre == cb)
+            return g_slots[i].resultBytes == returnBytes;
     }
     // A script function's Func is ProcessInternal, whose frame's code is the callee's own body, not parameters.
     const uint32_t flags = *reinterpret_cast<const uint32_t*>(static_cast<const uint8_t*>(ufunction) +
@@ -401,7 +416,7 @@ bool InstallPreHookFn(void* ufunction, PreNativeCallback cb, bool armed) {
         return false;
     }
     const int n = g_slotCount;
-    if (!ReadPreSignature(ufunction, g_slots[n])) return false;
+    if (!ReadPreSignature(ufunction, g_slots[n], returnBytes)) return false;
     auto* funcSlot = FuncSlotOf(ufunction);
     NativeFuncPtr original = *funcSlot;
     if (!original) {
@@ -440,6 +455,13 @@ bool InstallPostHook(const facts::Resolved& fn, PostNativeCallback cb, bool arme
 bool InstallPreHook(const facts::Resolved& fn, PreNativeCallback cb, bool armed) {
     if (!fn) return false;
     const bool ok = InstallPreHookFn(fn.Fn(), cb, armed);
+    fn.Row()->NoteUse(facts::kUseNativeHook, ok);
+    return ok;
+}
+
+bool InstallReturningPreHook(const facts::Resolved& fn, PreNativeCallback cb, int32_t returnBytes, bool armed) {
+    if (!fn || returnBytes < 1 || returnBytes > 8) return false;
+    const bool ok = InstallPreHookFn(fn.Fn(), cb, armed, returnBytes);
     fn.Row()->NoteUse(facts::kUseNativeHook, ok);
     return ok;
 }

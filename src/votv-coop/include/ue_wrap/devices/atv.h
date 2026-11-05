@@ -144,12 +144,25 @@ bool ReadTpLocation(void* atv, FVector& out);
 // The game's OWN rig-consistent teleport: ATV_C::teleportVehicle(NewLocation, NewRotation) --
 // K2_SetActorLocation(bTeleport=true) + K2_SetActorRotation(bTeleportPhysics=true), and THEN it
 // re-places frontWheel_R onto ax_FR1, frontWheel_L onto ax_FL1 and backWheelRoot onto `back`
-// [V, disasm ATV.teleportVehicle @0..393]. This is the WARP primitive and the only transform the
-// sync layer ever writes: a bare SetActorLocation moves the ROOT only
+// [V, disasm ATV.teleportVehicle @0..393]. Used for a fresh spawn's canonical
+// placement; an existing rig's correction uses the shape-preserving form below.
+// A bare SetActorLocation moves the ROOT only
 // (engine_attach.cpp:74-82) and leaves the constrained wheel bodies behind -- which is exactly
 // why the game ships two teleport forms. False on invalid pose, unresolved/retired
 // actor/class/function/world or a refused native call. Game thread.
 bool TeleportRig(void* atv, const FVector& loc, const FRotator& rot);
+
+// Correction of an existing articulated rig: preserve all four native physics
+// roots relative to the body, through vehicleGetParts + teleportVehicleAdvanced.
+// Unlike teleportVehicle this never resets suspension to construction markers.
+// Read/preflight failure leaves every body untouched; no canonical fallback.
+bool TeleportRigPreservingShape(void* atv, const FVector& loc, const FRotator& rot);
+
+// Match common horizontal motion across the four native physics roots. Preserve
+// every part's vertical/relative velocity and all angular velocities; no brake,
+// simulation or pose change. Missing/read-invalid parts fail before any write.
+// `before` receives the measured body velocity; `writes` is zero for a no-op.
+bool MatchRigPlanarVelocity(void* atv, const FVector& desired, FVector& before, int& writes);
 
 // The step at which SpawnMirror failed. SpawnMirror reports it and logs nothing for it: the caller
 // (coop) says it once per key, since a replay asks again.

@@ -403,8 +403,18 @@ void OnSpawn(const coop::net::PropSpawnPayload& payload, int senderSlot,
     // lane destroys one message later: the dropped prop never appears here, and its pose stream
     // addresses an actor that is gone. The same set prop_census hoists out of its own walk.
     void* handAxis[1 + coop::players::kMaxPeers];
+    auto isBoundToOtherEid = [](void* a, void* ctx) -> bool {
+        const auto targetEid = *static_cast<const uint32_t*>(ctx);
+        const coop::element::ElementId mirrorEid =
+            coop::remote_prop::ResolveMirrorEidByActor(a, /*wireMirrorOnly=*/true);
+        return (mirrorEid != coop::element::kInvalidId &&
+                static_cast<uint32_t>(mirrorEid) != targetEid);
+    };
     const ue_wrap::prop::NearbyExclusion notAdoptable{
-        handAxis, coop::hand_item::CollectHandAxisActors(handAxis, 1 + coop::players::kMaxPeers)};
+        handAxis, coop::hand_item::CollectHandAxisActors(handAxis, 1 + coop::players::kMaxPeers),
+        isBoundToOtherEid, const_cast<uint32_t*>(&payload.elementId)};
+
+
     // The fuzzy query reads the object index as it stands. The exact-key read caught it up on its
     // miss, unless it answered before reaching the catch-up (the key index not seeded, no world), so
     // it is caught up here too; with nothing queued that costs a check.

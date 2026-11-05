@@ -11,9 +11,10 @@ namespace test {
 struct Actor { bool ready=false, value=false; int calls=0; } actor;
 uint32_t generation=1;
 bool resolve=true;
+std::wstring nativeKey=L"light", portableKey=L"light";
 bool Ensure(){return resolve;}
 bool IsInstance(void*){return true;}
-std::wstring Key(void*){return L"light";}
+std::wstring Key(void*){return nativeKey;}
 bool Read(void*,bool& on){on=actor.value;return actor.ready;}
 bool Apply(void*,bool on){++actor.calls;if(!actor.ready)return false;actor.value=on;return true;}
 }
@@ -36,7 +37,7 @@ std::wstring GetActorSaveKeyString(void*){std::abort();}
 }
 namespace ue_wrap::world_identity {uint32_t Generation(){return test::generation;}}
 namespace coop::element {
-std::wstring PortableWireKey(void*){return L"light";}
+std::wstring PortableWireKey(void*){return test::portableKey;}
 std::wstring PortableIdentity(void*){return L"light";}
 }
 namespace coop::element::scan_hub {void Register(const Consumer&) {}}
@@ -113,4 +114,5 @@ int main() {
     Index(loading);loading.Tick();CHECK(host.sent.size()==1);
     std::puts("PASS join retry/current values, unreadable state, readiness, unicast baseline and lifecycle cleanup");
     std::puts("PASS real channel readiness retry, settled index, latest-state ordering, refusal, disconnect and world generation");
+    return 0;
 }

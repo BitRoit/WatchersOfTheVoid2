@@ -5,7 +5,16 @@ $output=Join-Path $root '_research/tests_2145'
 New-Item -ItemType Directory -Force -Path $output | Out-Null
 Push-Location $root
 try {
- if(-not(Get-Command cl -ErrorAction SilentlyContinue)){. (Join-Path $root '../_toolchain/env.ps1')}
+ if(-not(Get-Command cl -ErrorAction SilentlyContinue)){
+  $legacy=Join-Path $root '../_toolchain/env.ps1'
+  if(Test-Path -LiteralPath $legacy){. $legacy}else{
+   $vsDev='C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\Common7\Tools\VsDevCmd.bat'
+   if(Test-Path -LiteralPath $vsDev){
+    $lines=& cmd.exe /d /s /c ('call "'+$vsDev+'" -arch=x64 -host_arch=x64 >nul && set')
+    foreach($line in $lines){if($line -match '^(.*?)=(.*)$'){Set-Item -Path ('Env:'+$matches[1]) -Value $matches[2]}}
+   }
+  }
+ }
  foreach($name in @('cord','extinguisher','flashlight')) {
   & cl /nologo /std:c++20 /EHsc /Gy /utf-8 /I agent/tests/state_2145_stubs /I agent/tests/text_drone_stubs /I agent/tests/stubs /I src/votv-coop/include "/Fo$output/$name.obj" "/Fe$output/$name.exe" "agent/tests/${name}_2145_test.cpp" /link /OPT:REF
   if($LASTEXITCODE -ne 0){throw "Compile failed: $name"}
@@ -21,7 +30,7 @@ try {
    @{Name='peer';Before='if(old.known && (old.person!=now.person || old.generation!=now.generation))OnDisconnectForSlot(slot);';After='if(false)OnDisconnectForSlot(slot);'},
    @{Name='actor';Before="const auto belongs=[&]{return !coop::players::Registry::Get().IsLocal(puppetActor) &&`n        coop::players::Registry::Get().PeerIdOfActor(puppetActor)==senderPeerSlot;};";After='const auto belongs=[] { return true; };'},
    @{Name='payload';Before='const auto payload=incoming;';After='const auto& payload=incoming;'},
-   @{Name='first-setter';Before='if(!current())return false;';After='if(false)return false;'},
+   @{Name='first-setter';Before="ue_wrap::engine::SetLightCastShadows(light_R, false);`n        if (!current()) return false;";After="ue_wrap::engine::SetLightCastShadows(light_R, false);`n        if (false) return false;"},
    @{Name='send-completion';Before='if(revision!=g_sendRevision || !publisher.Is(coop::players::Registry::Get().Local())){';After='if(!publisher.Is(coop::players::Registry::Get().Local())){'}
   )
   foreach($mutation in $mutations){

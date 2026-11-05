@@ -448,6 +448,14 @@ void DriveWatches() {
 }  // namespace
 
 void Install(coop::net::Session* session) {
+    // Observer installation is polled every frame. Keep accepted delivery,
+    // poll cadence and pending native apply debt for the existing binding,
+    // while still retrying watches whose classes were not available earlier.
+    if (g_session.load(std::memory_order_acquire) == session &&
+        g_sessionSerial == coop::net::session_serial::Current()) {
+        DriveWatches();
+        return;
+    }
     ++g_epoch;
     g_sessionSerial = coop::net::session_serial::Current();
     g_polledWorldGen = 0; g_polledGm = nullptr; g_polledGmSerial = 0;

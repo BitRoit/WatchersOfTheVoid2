@@ -104,17 +104,29 @@ int32_t FindPropertyOffset(void* owningClass, const wchar_t* propName) {
 int32_t InstanceOffset::Of(void* obj) {
     void* const cls = obj ? ClassOf(obj) : nullptr;
     if (!cls) return -1;
-    if (cls != cls_ || !IsLiveByIndex(cls_, clsIdx_) || SlotSerial(clsIdx_) != clsSerial_) {
-        cls_ = cls;
-        clsIdx_ = InternalIndexOf(cls);
-        clsSerial_ = AllocateSlotSerial(clsIdx_);
-        off_ = FindPropertyOffset(cls, prop_);
-        if (off_ < 0)
-            UE_LOGW("reflection: the loaded %ls declares no '%ls'", ClassNameOf(obj).c_str(), prop_);
-        else
-            UE_LOGI("reflection: %ls.%ls @0x%04X", ClassNameOf(obj).c_str(), prop_, off_);
+    uint32_t slot = last_;
+    if (entries_[slot].cls != cls) {
+        for (slot = 0; slot < kCacheSize; ++slot)
+            if (entries_[slot].cls == cls) break;
+        if (slot == kCacheSize) {
+            slot = next_;
+            next_ = (next_ + 1) % kCacheSize;
+        }
     }
-    return off_;
+    Entry& entry = entries_[slot];
+    last_ = slot;
+    if (entry.cls == cls && IsLiveByIndex(cls, entry.index) && SlotSerial(entry.index) == entry.serial)
+        return entry.offset;
+    entry = {};
+    const int32_t index = InternalIndexOf(cls);
+    const int32_t serial = AllocateSlotSerial(index);
+    if (!IsLiveByIndex(cls, index)) return -1;
+    const int32_t offset = FindPropertyOffset(cls, prop_);
+    if (!IsLiveByIndex(cls, index) || SlotSerial(index) != serial) return -1;
+    entry = {cls, index, serial, offset};
+    if (offset < 0)
+        UE_LOGW("reflection: the loaded %ls declares no '%ls'", ClassNameOf(obj).c_str(), prop_);
+    return offset;
 }
 
 int32_t ParamOffset::Of(void* function) {

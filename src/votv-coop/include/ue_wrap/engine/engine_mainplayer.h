@@ -230,6 +230,12 @@ bool WriteMainPlayerFlashlight(void* mainPlayer, bool newState);
 // ULightComponent::SetIntensity (marks the render state dirty). Game thread.
 bool SetLightIntensity(void* light, float newIntensity);
 
+// ULightComponentBase::SetCastShadows: controls dynamic shadow map rendering for the light. Game thread.
+bool SetLightCastShadows(void* light, bool castShadows);
+
+// ULocalLightComponent::SetAttenuationRadius: controls light reach distance. Game thread.
+bool SetLightAttenuationRadius(void* light, float newRadius);
+
 // USceneComponent::SetVisibility alone, with no SetHiddenInGame: ULightComponent's override marks
 // the render state dirty without forcing hidden-in-game onto the component. Game thread.
 bool SetSceneComponentVisibility(void* sceneComponent, bool newVisibility, bool propagateToChildren);
@@ -246,6 +252,10 @@ bool SetSpotLightInnerConeAngle(void* spotLight, float newAngle);
 
 // AmainPlayer_C::isRagdoll (the AnimBP gate) and ::dead; false, outs untouched, while unresolved.
 bool ReadMainPlayerRagdollState(void* mainPlayer, bool& isRagdoll, bool& dead);
+
+// AmainPlayer_C::isWakingUp: true during the native 1.5s get-up blend timeline.
+// While waking up, ragdollActor is already destroyed; false while unresolved. Game thread.
+bool ReadMainPlayerIsWakingUp(void* mainPlayer);
 
 // AmainPlayer_C::sittingOn: the actor the player is seated on -- a chair, and the ATV, which
 // seats its driver through the same sit path -- or null on foot. False while unresolved.

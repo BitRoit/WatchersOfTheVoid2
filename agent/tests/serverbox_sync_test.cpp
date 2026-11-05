@@ -1,7 +1,12 @@
-#include "../../src/votv-coop/src/coop/interactables/serverbox_sync.cpp"
+#ifndef SERVERBOX_SYNC_SOURCE
+#define SERVERBOX_SYNC_SOURCE "../../src/votv-coop/src/coop/interactables/serverbox_sync.cpp"
+#endif
+#include SERVERBOX_SYNC_SOURCE
 #include "facts_test_support.h"
 #include <cassert>
 #include <cstdio>
+#include <cstdlib>
+#define CHECK(x) do{if(!(x)){std::fprintf(stderr,"FAIL %d: %s\n",__LINE__,#x);std::exit(1);}}while(0)
 #include <functional>
 #include <vector>
 namespace test {
@@ -153,5 +158,41 @@ int main(){
     onWrite=[&]{S::OnReliable(latest);Poll();};S::OnReliable(p);assert(writes==1&&broken&&S::g_pending.present);
     Poll();assert(writes==2&&!broken&&state.minigame==2&&!S::g_pending.present);Poll();assert(writes==2);
     Reset(s,Role::Client);onSkin=[]{++world;};S::OnReliable(p);assert(S::g_pending.present);Poll();assert(!S::g_pending.present);
+    // Production Install is polled every frame; accepted rows and the native
+    // one-second poll cadence must survive those same-binding calls.
+    Reset(s);Poll();assert(s.sent.size()==2);
+    // Hold the existing deadline beyond the fixture, independent of machine load.
+    const auto pollTime=S::g_lastPollMs=S::NowMs()+60000;
+    for(int frame=0;frame<600;++frame){S::Install(&s);S::Tick();}
+    CHECK(s.sent.size()==2&&S::g_lastPollMs==pollTime);
+    // Force normal due polls without sleeping: still no repeated unchanged row.
+    for(int poll=0;poll<60;++poll){S::Install(&s);Poll();}
+    assert(s.sent.size()==2);
+    broken=true;S::Install(&s);Poll();assert(s.sent.size()==4);
+    s.peers[3]=s.ready[3]=true;s.generations[3]=3;S::Install(&s);Poll();assert(s.sent.size()==5);
+    ++s.generations[1];S::Install(&s);Poll();assert(s.sent.size()==6);
+    S::QueueConnectBroadcastForSlot(1);assert(s.sent.size()==7);
+    ++serial;S::Install(&s);Poll();assert(s.sent.size()==10);
+    ++world;S::Install(&s);Poll();assert(s.sent.size()==13);
+    Reset(s);s.allowed[1]=false;
+    for(int poll=0;poll<60;++poll){S::Install(&s);Poll();}
+    assert(s.sent.size()==1&&s.sent[0].slot==2);
+    s.allowed[1]=true;S::Install(&s);Poll();assert(s.sent.size()==2);
+    // A client's unresolved apply must survive the next frame's Install.
+    Reset(s,Role::Client);writeable=false;S::OnReliable(p);
+    for(int frame=0;frame<60;++frame){S::Install(&s);Poll();}
+    assert(writes==0&&S::g_pending.present);writeable=true;S::Install(&s);Poll();
+    assert(writes==1&&broken&&!S::g_pending.present);
+    for(int frame=0;frame<60;++frame){S::Install(&s);Poll();}
+    assert(writes==1);
+    Reset(s,Role::Client);writeable=false;S::OnReliable(p);
+    ++world;S::Install(&s);writeable=true;Poll();assert(writes==0&&!broken);
+    Reset(s,Role::Client);writeable=false;S::OnReliable(p);
+    ++serial;S::Install(&s);writeable=true;Poll();assert(writes==0&&!broken);
+    Reset(s,Role::Client);writeable=false;S::OnReliable(p);
+    S::OnDisconnect();S::Install(&s);writeable=true;Poll();assert(writes==0&&!broken);
+    Reset(s);Poll();coop::net::Session replacement;S::Install(&replacement);Poll();
+    assert(replacement.sent.size()==2);
+    puts("PASS repeated production install polls retain serverbox delivery/cadence and pending native state; changes/replay/occupant/session/world rearm correctly");
     puts("PASS serverbox per-peer partial/all-refused delivery, static join/refusal debt, occupancy readiness, load-window apply retry, latest-row reentry and world/gamemode/session teardown guards");
 }
