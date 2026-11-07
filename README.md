@@ -3,9 +3,7 @@
 Fixes broken events and stuff like mannequins' AI, ragdoll + jump launching you into space, broken fall damage while ragdolling, and more
 
 # Known issues
-- Camera glitching when using a panel
-- Floppies being unsynced between the Client and the Host
-- Potentially something with prop sync
+- None
 
 ## Credits and license
 
