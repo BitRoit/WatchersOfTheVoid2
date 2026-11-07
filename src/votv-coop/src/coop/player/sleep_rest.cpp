@@ -2,6 +2,7 @@
 
 #include "coop/player/sleep_rest.h"
 #include "coop/player/sleep_sync.h"
+#include "coop/comms/chat_feed.h"
 
 #include "coop/net/net_clock.h"
 #include "coop/net/session.h"
@@ -35,6 +36,7 @@ namespace sg = ue_wrap::script_gate;
 // fingerprints_0.9.0n.inc), so a game update that changes the body is named at boot; the watch compares
 // the factor it finds in the same call.
 constexpr float kNativeSleepDilation = 20.0f;
+constexpr float kSoloRestDilation = 5.0f;
 constexpr int kTagSleepRest = 0x534C5253;  // 'SLRS'
 UE_FACT_FN(kRowSleep, "sleep_rest", L"mainGamemode_C", L"sleep", Declared);
 
@@ -48,6 +50,8 @@ bool g_saidFactor = false;  // a factor other than the pinned one is said once, 
 
 // The rest in progress. The gamemode and the body are held by identity: a world change or a new body ends it.
 bool g_resting = false;
+bool g_lastSleeping = false;
+bool g_lastAllResting = false;
 ue_wrap::CachedObjRef g_gm;
 ue_wrap::CachedObjRef g_body;
 // Each effect actor the rest dilated, so the end puts back those and not the list as it stands then:
@@ -65,8 +69,7 @@ float g_coffeeBase = 0.f;
 
 bool PersonalRest() {
     auto* s = g_session.load(std::memory_order_acquire);
-    return s && s->connected() &&
-        (s->role() == coop::net::Role::Client || !coop::sleep_sync::AllPlayersResting());
+    return s && s->running() && !coop::sleep_sync::AllPlayersResting();
 }
 
 // The local player's body: the registry's (warm while the controller holds the sleeping pawn), else the
@@ -114,13 +117,14 @@ void BeginRest() {
                 body, gm);
         return;
     }
-    if (!EN::SetCustomTimeDilation(body, kNativeSleepDilation)) return;
+    const float factor = coop::sleep_sync::AllPlayersResting() ? kNativeSleepDilation : kSoloRestDilation;
+    if (!EN::SetCustomTimeDilation(body, factor)) return;
     g_gm.Set(gm);
     g_body.Set(body);
     g_resting = true;
     g_haveFood = g_haveCoffee = false;
     UE_LOGI("sleep_rest: rest begun -- the world stays at 1, the body and the world's effects run at %.0f",
-            kNativeSleepDilation);
+            factor);
 }
 
 void EndRest(const char* why) {
@@ -195,8 +199,7 @@ void EnsureWatch() {
 
 // A fall since the last read: food gets (1 - 1/F) of it back, coffee loses (F - 1) times it more. A rise
 // is not touched, and the baseline is read again after the write.
-void SettleNeeds() {
-    constexpr float kF = kNativeSleepDilation;
+void SettleNeeds(float kF) {
     float food = 0.f, coffee = 0.f;
     if (V::Read(V::Field::Food, &food)) {
         const float fall = g_haveFood ? g_foodBase - food : 0.f;
@@ -223,36 +226,61 @@ void Tick() {
     auto* s = g_session.load(std::memory_order_acquire);
     if (!s || !s->running()) return;
     EnsureWatch();
-    if (s->role() == coop::net::Role::Host) {
-        float asleep = 0.f;
-        if (V::Read(V::Field::Sleeping, &asleep) && asleep != 0.f) {
-            if (coop::sleep_sync::AllPlayersResting()) {
-                if (g_resting) EndRest("all players are resting");
-                SLP::SetGlobalTimeDilation(kNativeSleepDilation);
-            } else {
-                // Reevaluate during the rest as peers wake, join or disconnect.
-                SLP::SetGlobalTimeDilation(1.f);
-                if (!g_resting) BeginRest();
-            }
-        }
+
+    float asleep = 0.f;
+    const bool isSleepingNow = V::Read(V::Field::Sleeping, &asleep) && asleep != 0.f;
+    const bool allResting = isSleepingNow && coop::sleep_sync::AllPlayersResting();
+
+    if (isSleepingNow && (!g_lastSleeping || allResting != g_lastAllResting)) {
+        coop::chat_feed::Push(
+            allResting ? "[Sleep] All players resting (20x speed)!"
+                       : "[Sleep] Resting solo (5x speed)...",
+            coop::chat_feed::Keep::Transient);
     }
+    g_lastSleeping = isSleepingNow;
+    g_lastAllResting = allResting;
+
+    if (!SLP::EnsureResolved()) return;
+
+    // 1. Not sleeping at all: make sure world and body dilation are back to 1x
+    if (!isSleepingNow) {
+        if (g_resting) {
+            SLP::SetGlobalTimeDilation(1.f);
+            EndRest("the sleeping flag fell");
+        } else if (std::fabs(SLP::GetGlobalTimeDilation() - kNativeSleepDilation) <= 0.01f) {
+            SLP::SetGlobalTimeDilation(1.f);
+        }
+        return;
+    }
+
+    // 2. Everyone is sleeping: run the whole world at 20x on both Host and Client,
+    // and keep body CustomTimeDilation at 1x so they don't stack to 400x.
+    if (allResting) {
+        if (g_resting) EndRest("all players resting at global 20x");
+        SLP::SetGlobalTimeDilation(kNativeSleepDilation);
+        return;
+    }
+
+    // 3. Sleeping solo while other players are awake: keep world at 1x and dilate body/effects by 5x.
+    SLP::SetGlobalTimeDilation(1.f);
+    if (!g_resting) BeginRest();
     if (!g_resting) return;
-    if (!PersonalRest()) return EndRest("the personal rest ended");
+
     void* const gm = ue_wrap::world_singleton::Gamemode();
     if (!gm || gm != g_gm.Raw() || !g_gm.Alive()) return EndRest("the gamemode changed");
-    void* const body = CurrentBody();
-    if (!body || body != g_body.Raw() || !g_body.Alive()) return EndRest("the body changed");
-    // The wake itself happens in the game; the body and the effects run at the native factor until this tick
-    // sees the flag fall, one frame at most.
-    float asleep = 0.f;
-    if (!V::Read(V::Field::Sleeping, &asleep) || asleep == 0.f) return EndRest("the sleeping flag fell");
-    float factor = kNativeSleepDilation;
+    void* const body = g_body.Get();
+    if (!body) return EndRest("the body died");
+
+    EN::SetCustomTimeDilation(body, kSoloRestDilation);
+    float factor = kSoloRestDilation;
     FX::ForEachWorldEffect(&DilateEffect, &factor);
-    SettleNeeds();
+    SettleNeeds(kSoloRestDilation);
 }
 
 void OnDisconnect() {
     if (g_resting) EndRest("the session ended");
+    g_lastSleeping = false;
+    g_lastAllResting = false;
 }
 
 }  // namespace coop::sleep_rest

@@ -1,4 +1,5 @@
 // coop/interactables/sat_console_sync.cpp -- see coop/interactables/sat_console_sync.h.
+#include "coop/interactables/floppy_slot_sync.h"
 
 #include "coop/interactables/sat_console_sync.h"
 
@@ -790,6 +791,7 @@ void HostOnBlob(uint8_t slot, const std::vector<uint8_t>& blob) {
 // Every write of a terminal's busy flag lies in its enterCommand or its ubergraph, the latent
 // continuations included, so the level is read after each and sent when it moved.
 void HostAfterBody(Terminal& t) {
+    coop::floppy_slot_sync::Tick();
     const int slot=t.slot;const auto guid=t.guid;void* term=t.pin.Raw();
     auto* s=SessionIf(coop::net::Role::Host);
     if(slot<=0 || slot>=kMaxPeers || !s || !BindPeer(s,uint8_t(slot)) || g_peerGuid[slot]!=guid)return;

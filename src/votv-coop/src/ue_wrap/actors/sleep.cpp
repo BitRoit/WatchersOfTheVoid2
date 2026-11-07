@@ -81,7 +81,7 @@ void ResolvePass() {
         if (gsCls && !g_getDilationFn)
             g_getDilationFn = R::FindFunction(gsCls, L"GetGlobalTimeDilation");
     }
-    const bool core = g_offIsSleep >= 0 && g_offDreamProb >= 0 && g_setDilationFn;
+    const bool core = g_offIsSleep >= 0 && g_setDilationFn;
     if (core && !g_coreResolved) {
         g_coreResolved = true;
         UE_LOGI("sleep: resolved (isSleep=0x%X dreamProb=0x%X bed=0x%X origPawn=0x%X sleep=%s "

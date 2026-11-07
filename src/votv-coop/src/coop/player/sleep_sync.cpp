@@ -8,7 +8,8 @@
 #include "coop/net/session.h"
 #include "coop/net/session_serial.h"
 #include "coop/net/wire_key_util.h"
-#include "coop/player/roster_ledger.h"  // PerSlotState, DisplayName
+#include "coop/player/players_registry.h"
+#include "coop/player/roster_ledger.h"  // PerSlotState, DisplayName, Occupied
 #include "coop/text/utf8_codec.h"
 #include "l10n/l10n.h"
 
@@ -263,7 +264,7 @@ void SendClientRest(coop::net::Session* s) {
     p.bed = g_localBed;
     const auto epoch=g_epoch;
     const auto serial=++g_clientSendSerial;
-    if (s->SendReliableToSlot(0, coop::net::ReliableKind::SleepState, &p, sizeof(p)) && Current(s,epoch) &&
+    if (s->SendReliable(coop::net::ReliableKind::SleepState, &p, sizeof(p)) && Current(s,epoch) &&
         s->connected() && !IsHost(s) && serial==g_clientSendSerial) {
         g_sentState = static_cast<SleepPeerState>(p.state);
         g_sentBed = p.bed;g_haveSent=true;
@@ -286,7 +287,7 @@ void Tick() {
     RefreshContext(s);
     if(IsHost(s)){ConformPeers(s);FlushHost(s);}
     const auto epoch=g_epoch;
-    if (!SLP::EnsureResolved()) return;
+    // SLP::EnsureResolved() not required for vitals poll
 
     SleepPeerState state = SleepPeerState::Awake;
     bool sleeping = false;
@@ -445,10 +446,19 @@ bool HostAsleepNow() {
 
 bool AllPlayersResting() {
     auto* s = g_session.load(std::memory_order_acquire);
-    if (!s || !s->running() || !IsHost(s))return false;
+    if (!s || !s->running() || (!IsHost(s) && !s->connected())) return false;
     RefreshContext(s);
-    SleepPeerState local{};bool sleeping=false;
+    SleepPeerState local{}; bool sleeping = false;
     if(!ReadLocal(&local,&sleeping) || local!=SleepPeerState::Resting || !sleeping)return false;
+    if (!IsHost(s)) {
+        if (!g_hostSleeping || g_state[0] == SleepPeerState::Dreaming) return false;
+        const int selfSlot = static_cast<int>(coop::players::Registry::Get().LocalPeerId());
+        for (int slot = 1; slot < static_cast<int>(coop::net::kMaxPeers); ++slot) {
+            if (slot == selfSlot || !coop::roster_ledger::Occupied(slot)) continue;
+            if (g_state[slot] != SleepPeerState::Resting) return false;
+        }
+        return true;
+    }
     for (int slot = 1; slot < static_cast<int>(coop::net::kMaxPeers); ++slot) {
         if (!s->IsSlotConnected(slot)) continue;
         if (!s->IsSlotWorldReady(slot) || g_generation[slot]!=s->peerGenerationForSlot(slot) ||

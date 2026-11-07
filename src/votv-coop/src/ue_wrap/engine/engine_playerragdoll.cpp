@@ -585,12 +585,15 @@ bool RefreshLocalRagdollModel(void* mainPlayer) {
     };
     const bool inRagdoll=flag(L"isRagdoll",true);
 
-    // Steady-state watchdog: ONLY once standing on foot and wakingup timeline
-    // has finished/aborted (!inRagdoll && !isWakingUp), verify lag relative
-    // offset has settled at {0, 0, eyeHeight} relative to crouchRoot.
-    // Read lag's RelativeLocation via R::FindPropertyOffset before calling
-    // GetAttachParent so normal on-foot play has zero ProcessEvent (Call) overhead.
-    if (!inRagdoll && !flag(L"isWakingUp", false)) {
+    // Post-ragdoll settle check: arm when in ragdoll or waking up, and verify ONCE
+    // when returning to on-foot state (!inRagdoll && !isWakingUp) so it never fights
+    // native camera offsets during terminal/panel interaction.
+    static bool s_needsPostRagdollSettle = false;
+    const bool isWakingUp = flag(L"isWakingUp", false);
+    if (inRagdoll || isWakingUp) {
+        s_needsPostRagdollSettle = true;
+    } else if (s_needsPostRagdollSettle) {
+        s_needsPostRagdollSettle = false;
         void* lag = LocalComponent(mainPlayer, L"lag");
         if (lag) {
             const int locOff = R::FindPropertyOffset(R::ClassOf(lag), L"RelativeLocation");

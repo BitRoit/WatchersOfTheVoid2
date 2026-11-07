@@ -8,4 +8,5 @@ template<class T> struct PerSlotState {
     T& operator[](int slot) { return rows.at(slot); }
 };
 inline const std::wstring& DisplayName(int) {static const std::wstring name=L"Host";return name;}
+inline bool Occupied(int) { return false; }
 }
