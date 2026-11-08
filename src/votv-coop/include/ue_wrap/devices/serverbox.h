@@ -100,6 +100,15 @@ bool CallBreakServer(void* box);
 // Whether `obj` is the gamemode's repair widget, the caller of a player's own fix.
 bool IsRepairWidget(void* obj);
 
+// Whether the gamemode's repair widget is currently active on screen. Game thread.
+bool IsRepairWidgetActive();
+
+// The serverBox currently targeted by the gamemode's repair widget; nullptr if inactive. Game thread.
+void* RepairWidgetTarget();
+
+// Force-exit the repair widget without completing the repair, restoring player input. Game thread.
+bool CallRepairExit();
+
 // [dev] A player's finished repair as the game runs it: the gamemode's widget, its `server` set to `box`,
 // then its end(correct), whose success pays the player and calls the box's fix.
 bool CallRepairEnd(void* box, bool correct);

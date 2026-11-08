@@ -642,6 +642,10 @@ void OnReply(const coop::net::PropActReplyPayload& p) {
         return;
     case internal::ReplyAction::Refused:
         if (p.reason < coop::net::kPropActReasons) ++g_refused[p.reason];
+        if (p.reason == static_cast<uint8_t>(coop::net::PropActReason::Gone) && g_rec.eid != coop::element::kInvalidId) {
+            void* const local = coop::players::Registry::Get().Local();
+            coop::remote_prop::OnDestroy(coop::net::PropDestroyPayload{{}, g_rec.eid}, local, /*senderSlot=*/0);
+        }
         ShowRefusal(p.reason);
         Close();
         return;

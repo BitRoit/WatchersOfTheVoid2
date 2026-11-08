@@ -303,6 +303,45 @@ bool CallBreakServer(void* box) {
 
 bool IsRepairWidget(void* obj) { return obj && obj == RepairWidget(); }
 
+void* RepairWidgetTarget() {
+    void* w = RepairWidget();
+    if (!w) return nullptr;
+    void* wCls = R::ClassOf(w);
+    static void* s_cachedCls = nullptr;
+    static int32_t s_cachedOffServer = -1;
+    if (s_cachedCls != wCls) {
+        s_cachedCls = wCls;
+        s_cachedOffServer = R::FindPropertyOffset(wCls, L"server");
+    }
+    if (s_cachedOffServer < 0) return nullptr;
+    void* target = *reinterpret_cast<void**>(reinterpret_cast<uint8_t*>(w) + s_cachedOffServer);
+    return (target && R::IsLive(target)) ? target : nullptr;
+}
+
+bool IsRepairWidgetActive() {
+    void* w = RepairWidget();
+    if (!w) return false;
+    void* wCls = R::ClassOf(w);
+    void* fnInViewport = R::FindDispatchFunctionCached(wCls, L"IsInViewport");
+    if (fnInViewport) {
+        ParamFrame f(fnInViewport);
+        if (f.valid() && Call(w, f)) {
+            return f.Get<bool>(L"ReturnValue");
+        }
+    }
+    return false;
+}
+
+bool CallRepairExit() {
+    void* w = RepairWidget();
+    if (!w) return false;
+    void* wCls = R::ClassOf(w);
+    void* fn = R::FindDispatchFunctionCached(wCls, L"end");
+    if (!fn) return false;
+    ParamFrame f(fn);
+    return f.valid() && f.Set<bool>(L"correct", false) && Call(w, f);
+}
+
 bool CallRepairEnd(void* box, bool correct) {
     void* w = box ? RepairWidget() : nullptr;
     if (!w) return false;

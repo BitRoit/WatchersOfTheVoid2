@@ -267,6 +267,10 @@ coop::net::Served ServeHead(uint8_t slot, const Queued& q) {
         }
     } else {
         g_refusals.Note(slot, internal::VerdictName(v), Now());
+        if (v == internal::ActVerdict::Gone && g_session) {
+            coop::net::PropDestroyPayload destroyPayload{{}, q.req.eid};
+            g_session->SendReliableToSlot(slot, ReliableKind::PropDestroy, &destroyPayload, sizeof(destroyPayload));
+        }
     }
     UE_LOGI("prop_act: slot %u family %u eid %u -> %s (dist %.0f of %.0f uu)", static_cast<unsigned>(slot),
             static_cast<unsigned>(q.req.family), static_cast<unsigned>(q.req.eid),

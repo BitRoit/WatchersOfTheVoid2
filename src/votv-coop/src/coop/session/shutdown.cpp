@@ -13,6 +13,7 @@
 
 #include <atomic>
 #include <mutex>
+#include <thread>
 
 namespace coop::shutdown {
 
@@ -85,8 +86,21 @@ LRESULT CALLBACK CoopWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         msg == WM_CLOSE ||
         (msg == WM_SYSCOMMAND && (wp & 0xFFF0) == SC_CLOSE);
     if (isDirectClose) {
+        if (g_shuttingDown.load(std::memory_order_relaxed)) {
+            UE_LOGW("shutdown: repeated close signal received while already shutting down -- forcing immediate exit");
+            ::TerminateProcess(::GetCurrentProcess(), 0);
+            return 0;
+        }
         UE_LOGI("shutdown: close-signal received on HWND=%p msg=0x%X wp=0x%X",
                 hwnd, msg, static_cast<unsigned>(wp));
+        static std::atomic<bool> s_watchdogStarted{false};
+        if (!s_watchdogStarted.exchange(true)) {
+            std::thread([]() {
+                ::Sleep(1500);
+                UE_LOGW("shutdown: close-signal fallback watchdog triggered -- terminating process");
+                ::TerminateProcess(::GetCurrentProcess(), 0);
+            }).detach();
+        }
         DoShutdown();
     }
 

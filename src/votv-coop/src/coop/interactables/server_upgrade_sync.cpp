@@ -3,6 +3,7 @@
 #include "coop/interactables/server_upgrade_sync.h"
 
 #include "coop/element/element.h"
+#include "coop/element/registry.h"
 #include "coop/net/protocol.h"
 #include "coop/net/session.h"
 #include "coop/player/players_registry.h"
@@ -233,7 +234,7 @@ void ClientRemoveTakeOutGhost(uint8_t box) {
     SB::ForEachUpgrade([](void* c, void* obj) {
         auto* x = static_cast<Ctx*>(c);
         if (obj == HeldActor()) return;
-        if (coop::prop_element_tracker::GetPropElementIdForActor(obj) != coop::element::kInvalidId) return;
+        if (coop::element::Registry::Get().EidForActor(obj) != coop::element::kInvalidId) return;
         ue_wrap::FVector p{};
         if (!ue_wrap::engine::TryGetActorLocation(obj, p)) return;
         const float dx = p.X - x->at.X, dy = p.Y - x->at.Y, dz = p.Z - x->at.Z;

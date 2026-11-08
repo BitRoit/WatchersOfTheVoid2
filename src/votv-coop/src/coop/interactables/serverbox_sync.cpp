@@ -30,6 +30,7 @@
 #include <cstdint>
 #include <cstring>
 #include <vector>
+#include <windows.h>
 
 namespace coop::serverbox_sync {
 namespace {
@@ -44,6 +45,7 @@ std::atomic<uint64_t> g_epoch{0};
 uint32_t g_sessionSerial = 0;
 bool g_driving = false;
 Counts g_counts;
+long long g_repairWatchdogDeadlineMs = 0;
 
 constexpr int       kMaxServers     = 64;    // the row's width; a base runs ~54 boxes
 constexpr long long kPollIntervalMs = 1000;
@@ -267,11 +269,16 @@ bool ApplyState(coop::net::Session* s, const coop::net::ServerStatePayload& p, c
             // What the repair widget reads: the type it enters with, and whether the repair pays.
             SB::RepairState r;
             r.damaged = (p.damagedMask >> i) & 1ull;
-            r.minigame = p.minigame[i];
+            const int8_t rawType = static_cast<int8_t>(p.minigame[i]);
+            r.minigame = (rawType < 0 || rawType > 7) ? -1 : static_cast<int32_t>(rawType);
             complete = SB::WriteRepairState(sb, r) && complete;
             if (!Current(s, root)) return false;
         }
         const bool desired = (p.isBrokenMask >> i) & 1ull;
+        if (!desired && SB::IsRepairWidgetActive() && SB::RepairWidgetTarget() == sb) {
+            UE_LOGI("serverbox_sync: server %d repaired by peer -- auto-exiting minigame", i);
+            SB::CallRepairExit();
+        }
         auto& debt = g_pending.skinDebt[i];
         const bool retry = debt.Is(sb);
         if (!retry) debt.Reset();
@@ -396,7 +403,10 @@ sg::Verdict OnFixPre(const sg::Call& call) {
     coop::net::ServerRepairPayload p{};
     p.box = static_cast<uint8_t>(box);
     ReadWidgetReward(call.callerObject, p);
-    if (s->SendReliableToSlot(0, coop::net::ReliableKind::ServerRepair, &p, sizeof(p))) ++g_counts.repairsSent;
+    if (s->SendReliableToSlot(0, coop::net::ReliableKind::ServerRepair, &p, sizeof(p))) {
+        ++g_counts.repairsSent;
+        g_repairWatchdogDeadlineMs = NowMs() + 1500;
+    }
     UE_LOGI("serverbox_sync: this player's repair of box %d sent to the host (%llu sent)", box,
             static_cast<unsigned long long>(g_counts.repairsSent));
     return sg::Verdict::Cancel;
@@ -471,6 +481,24 @@ void Tick() {
     DriveWatches();
     if (g_driving) return;
     if (auto* client = ClientSession()) {
+        static bool s_wasEscDown = false;
+        const bool isEscDown = (::GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0;
+        DWORD foregroundPid = 0;
+        ::GetWindowThreadProcessId(::GetForegroundWindow(), &foregroundPid);
+        const bool isForeground = (foregroundPid == ::GetCurrentProcessId());
+
+        if (SB::IsRepairWidgetActive() && isForeground && isEscDown && !s_wasEscDown) {
+            UE_LOGI("serverbox_sync: player pressed ESC in server minigame -- exiting minigame");
+            SB::CallRepairExit();
+        }
+        s_wasEscDown = isEscDown;
+        if (g_repairWatchdogDeadlineMs != 0 && NowMs() > g_repairWatchdogDeadlineMs) {
+            g_repairWatchdogDeadlineMs = 0;
+            if (SB::IsRepairWidgetActive()) {
+                UE_LOGW("serverbox_sync: post-fix minigame exit watchdog expired -- forcing exit");
+                SB::CallRepairExit();
+            }
+        }
         if (!g_pending.present) return;
         // The world can be announced before its gamemode is discoverable. Bind
         // the snapshot once it appears; once bound, a replacement cancels it.
@@ -588,6 +616,7 @@ void OnDisconnect() {
     for (int slot = 0; slot < g_delivery.size(); ++slot) g_delivery[slot] = {};
     g_pending = {};
     g_lastPollMs = 0;
+    g_repairWatchdogDeadlineMs = 0;
     g_session.store(nullptr, std::memory_order_release);
 }
 
