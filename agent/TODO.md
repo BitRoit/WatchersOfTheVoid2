@@ -6,6 +6,18 @@ acceptance, qualification and results belong in WORK.md and TESTLOG.md.
 
 ## Priority regressions
 
+- [x] Local co-op launcher: launch the installed profile DLLs without deploying a build or rewriting game configuration.
+- [x] PWR3: complete laptop breaker timers through the verified native continuation so waterlogging, the button and the power panel follow the game script.
+- [x] SCX1: preserve the selected satellite across in-flight console commands and exclude remote player mirrors from console panel overlap callbacks.
+- [x] PWR2: retry cleanup of managed breaker spinners without resetting native countdowns.
+- [x] ROACH2: interpolate estimated crawl yaw on the existing wire and preserve native client tick authority.
+- [x] ATVA2: use the visual-only ATV light function for remote state and keep each click positional.
+
+- [x] BRM1: separate Broomba watch registration from layout resolution, wrap native turn targets without restoring over a new target, and feed active host Broombas into the existing prop drive lane.
+- [x] PWR1: keep breaker restores bound to the live panel and terminal, cancel conflicts with newer authoritative changes, and restore the native button path outside multiplayer or when the replacement is unavailable.
+- [x] ROACH1: send moving roach samples at the existing poll cadence, preserve surviving client components, and retry refused native adds within a fixed budget.
+- [x] ATVA1: play positional headlight clicks from admitted ATV state changes and limit native engine emitter range.
+
 - [x] PERF3a: preserve balance delivery and pending client native/HUD state across the every-frame same-session SetSession retry.
 - [x] PERF3b: preserve serverbox delivery, native-apply debt and poll cadence across same-session Install retries while continuing watch installation attempts.
 

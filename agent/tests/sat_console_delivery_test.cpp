@@ -4,6 +4,7 @@
 #include "ue_wrap/core/script_gate.h"
 #include "ue_wrap/core/log.h"
 #include "ue_wrap/engine/world_identity.h"
+#include "coop/element/player.h"
 #include "coop/net/session.h"
 #include <array>
 #include <cstdio>
@@ -43,6 +44,11 @@ int32_t SlotSerial(int32_t i) { return i>0 && size_t(i)<test::slots.size()?test:
 int32_t AllocateSlotSerial(int32_t i) { return SlotSerial(i); }
 bool IsLiveByIndex(void* p,int32_t i) { return i>0 && size_t(i)<test::slots.size() && test::slots[i]==p && test::slots[i]->live; }
 bool IsLive(void* p) { return p && static_cast<test::Obj*>(p)->live; }
+const FName& NameOf(void*) { static const FName none{}; return none; }
+bool NameEquals(const FName&,const wchar_t*) { return false; }
+void* OuterOf(void*) { return nullptr; }
+int32_t FindParamOffset(void*,const wchar_t*) { return -1; }
+int32_t FunctionFrameSize(void*) { return 0; }
 }
 namespace ue_wrap::world_identity {
 uint32_t Generation() { return test::world; }
@@ -68,6 +74,7 @@ namespace script_gate {
 bool IsInvocationActive(uint64_t invocation) { return invocation!=0; }
 bool WatchName(const facts::Function&,int,PreFn,PostFn) { return true; }
 bool UnwatchName(const facts::Function&,int,PreFn,PostFn) { return true; }
+bool NameWatchLive(const facts::Function&,int) { return false; }
 }
 namespace console_desk { void* Instance() { return test::local; } }
 namespace dish { int IndexOf(void*){return -1;} void* DishByIndex(int){return nullptr;} int Count(){return 0;} }
@@ -102,6 +109,11 @@ bool ClearLog(void* p){static_cast<test::Obj*>(p)->log.clear();return true;}
 }
 namespace coop::net::session_serial {uint32_t Current(){return test::sessionSerial;}}
 namespace coop::player_handshake {const std::string& GuidForSlot(int slot){return test::guids.at(slot);}}
+namespace coop::floppy_slot_sync {void Tick() {}}
+namespace coop::players {
+Registry& Registry::Get(){static auto* instance=new Registry;return *instance;}
+bool Registry::IsPuppetBody(void*) {return false;}
+}
 
 namespace test {
 namespace S=coop::sat_console_sync;

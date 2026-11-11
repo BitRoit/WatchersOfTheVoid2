@@ -115,6 +115,10 @@ std::wstring RadioUrl(void* atv);
 bool  GetHasMap(void* atv);
 void  SetBrake(void* atv, bool on);
 void  SetLights(void* atv, bool on);
+// Warm the attenuation asset outside ATV index iteration, then bind each
+// instance's native engine emitters for their next playback.
+void PrepareEngineAudio(uint64_t nowMs);
+bool ConfigureEngineAudio(void* atv);
 void  SetTurbo(void* atv, bool on);
 // Play or pause the scooter's own radio. No url change; that is Drive on the media player.
 void  SetRadio(void* atv, bool on);

@@ -9,16 +9,21 @@
 #include "ue_wrap/core/log.h"
 #include "ue_wrap/core/object_index.h"
 #include "ue_wrap/core/reflection.h"
+#include "ue_wrap/core/script_calls.h"
+#include "ue_wrap/core/script_fingerprint.h"
+#include "ue_wrap/core/sdk_profile.h"
 #include "ue_wrap/core/sdk_profile_names.h"
 #include "ue_wrap/engine/engine.h"            // TryGetActorLocation
 #include "ue_wrap/engine/engine_audio.h"      // PlaySoundAtLocation
 #include "ue_wrap/engine/engine_component.h"  // GetComponentLocation
 #include "ue_wrap/engine/hit_result.h"
+#include "ue_wrap/engine/umg_build.h"
 #include "ue_wrap/world/world_singleton.h"
 
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <cstring>
 
 namespace ue_wrap::power_control {
 namespace {
@@ -91,6 +96,17 @@ ArrayMember g_servers{L"servers"};
 
 // The stationTurnon sound, an asset held while its slot and serial still hold it.
 CachedObjRef g_turnOnCue;
+R::InstanceOffset g_offBreakerIndex{L"index"};
+R::InstanceOffset g_offBreakerSwitcher{L"switcher_button"};
+CachedObjRef g_breakerButtonSound;
+CachedObjRef g_breakerFinishFn;
+bool g_breakerFinishMatches = false;
+
+// The generated 0.9.0n fingerprint verifies the behavior of the graph.
+// BreakerFinishLayoutMatches also checks the raw offsets used by the latent entry.
+constexpr int32_t kBreakerFinishEntry = 182;
+constexpr uint64_t kBreakerFinishSignature = 0xd3c93c9d2749b427ull;
+constexpr uint64_t kBreakerFinishBody = 0x25d3c9c8f915adeeull;
 
 uint64_t NowMs() {
     return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -312,5 +328,137 @@ bool ReadServers(void* p, ServerState& out) {
 }
 
 bool CallVirusLockout(void* p) { return CallVerb(p, L"virus_pb"); }
+
+bool IsBreakerCompWidget(void* obj) {
+    if (!obj) return false;
+    void* cls = R::ClassOf(obj);
+    return cls && R::NameEquals(R::NameOf(cls), L"ui_breakerComp_C");
+}
+
+bool ReadBreakerCompIndex(void* widget, int32_t& outIndex) {
+    if (!widget) return false;
+    const int32_t off = g_offBreakerIndex.Of(widget);
+    if (off < 0) return false;
+    outIndex = *reinterpret_cast<const int32_t*>(reinterpret_cast<const uint8_t*>(widget) + off);
+    return true;
+}
+
+namespace {
+bool BreakerFinishLayoutMatches(const uint8_t* script, int32_t size) {
+    constexpr int32_t kReturn = 1811;
+    constexpr int32_t kDelayEnd = 1795;
+    if (!script || size != kReturn + 3) return false;
+    int32_t returnOffset = 0, delayLinkage = 0;
+    std::memcpy(&returnOffset, script + 1, sizeof(returnOffset));
+    std::memcpy(&delayLinkage, script + kDelayEnd - 25, sizeof(delayLinkage));
+    return script[0] == 0x4c && script[5] == 0x4e && script[6] == 0x00 && // PushExecutionFlow, ComputedJump, LocalVariable
+        returnOffset == kReturn && script[kReturn] == 0x04 &&             // Return
+        script[kReturn + 1] == 0x0b && script[kReturn + 2] == 0x53 &&     // Nothing, EndOfScript
+        script[kDelayEnd - 26] == 0x5b && delayLinkage == kBreakerFinishEntry && // SkipOffsetConst
+        script[kDelayEnd] == 0x4d && script[kBreakerFinishEntry] == 0x19; // PopExecutionFlow, Context
+}
+
+bool BreakerFinishLayoutMatches(void* fn) {
+    const auto* function = static_cast<const uint8_t*>(fn);
+    const auto* script = *reinterpret_cast<const uint8_t* const*>(function + P::off::UStruct_Script);
+    const auto size = *reinterpret_cast<const int32_t*>(function + P::off::UStruct_ScriptNum);
+    if (!BreakerFinishLayoutMatches(script, size)) return false;
+    void* jumpProperty = nullptr;
+    std::memcpy(&jumpProperty, script + 7, sizeof(jumpProperty));
+    void* const entryProperty = *reinterpret_cast<void* const*>(function + P::off::UStruct_ChildProperties);
+    if (!entryProperty || jumpProperty != entryProperty) return false;
+
+    std::vector<script_calls::CallSite> calls;
+    if (!script_calls::EnumerateCalls(fn, calls)) return false;
+    for (const auto& call : calls) {
+        if (call.start == 1737 && call.end == 1795 && call.callee &&
+            script_fingerprint::PathOf(call.callee) == "kismetsystemlibrary.delay") return true;
+    }
+    return false;
+}
+
+void* BreakerFinishFunction(void* widget, void* panel) {
+    if (!widget || !panel || !R::IsLive(widget) || !R::IsLive(panel)) return nullptr;
+    CachedObjRef widgetRef, panelRef;
+    widgetRef.Set(widget);
+    panelRef.Set(panel);
+    void* gm = world_singleton::Gamemode();
+    if (!gm || ObjectField(widget, L"gamemode") != gm || Panel() != panel) return nullptr;
+    void* fn = R::FindDispatchFunctionCached(R::ClassOf(widget), L"ExecuteUbergraph_ui_breakerComp");
+    if (!fn) return nullptr;
+    if (!g_breakerFinishFn.Is(fn)) {
+        g_breakerFinishFn.Set(fn);
+        const auto fingerprint = script_fingerprint::Of(fn);
+        g_breakerFinishMatches = fingerprint.ok && !fingerprint.native &&
+            fingerprint.sigHash == kBreakerFinishSignature && fingerprint.bodyHash == kBreakerFinishBody &&
+            BreakerFinishLayoutMatches(fn);
+        if (!g_breakerFinishMatches)
+            UE_LOGW("power_control: breaker continuation fingerprint did not match; using native click delay");
+    }
+    if (!g_breakerFinishMatches || !g_breakerFinishFn.Is(fn) || !widgetRef.Is(widget) ||
+        !panelRef.Is(panel) || world_singleton::Gamemode() != gm || ObjectField(widget, L"gamemode") != gm ||
+        Panel() != panel) return nullptr;
+    return fn;
+}
+}
+
+bool CanFinishBreakerComp(void* widget, void* panel) {
+    void* fn = BreakerFinishFunction(widget, panel);
+    if (!fn) return false;
+    ParamFrame frame(fn);
+    return frame.valid() && frame.Set<int32_t>(L"EntryPoint", kBreakerFinishEntry);
+}
+
+BreakerCompFinish FinishBreakerComp(void* widget, void* panel) {
+    CachedObjRef widgetRef, panelRef;
+    widgetRef.Set(widget);
+    panelRef.Set(panel);
+    void* fn = BreakerFinishFunction(widget, panel);
+    if (!fn) return BreakerCompFinish::Unavailable;
+    ParamFrame frame(fn);
+    if (!frame.valid() || !frame.Set<int32_t>(L"EntryPoint", kBreakerFinishEntry) ||
+        !widgetRef.Is(widget) || !panelRef.Is(panel) || !g_breakerFinishFn.Is(fn) || Panel() != panel)
+        return BreakerCompFinish::Unavailable;
+    return Call(widget, frame) ? BreakerCompFinish::Ran : BreakerCompFinish::Faulted;
+}
+
+uint8_t BreakerBitForCompIndex(int32_t compIndex) {
+    switch (compIndex) {
+        case 0: return 0x08;  // press_calc (bit 3)
+        case 1: return 0x02;  // press_downl (bit 1)
+        case 2: return 0x01;  // press_coord (bit 0)
+        case 3: return 0x04;  // press_play (bit 2)
+        case 4: return 0x10;  // press_light (bit 4)
+        default: return 0;
+    }
+}
+
+bool ResetBreakerCompSwitcher(void* widget) {
+    if (!widget) return false;
+    const int32_t off = g_offBreakerSwitcher.Of(widget);
+    if (off < 0) return false;
+    void* sw = *reinterpret_cast<void* const*>(reinterpret_cast<const uint8_t*>(widget) + off);
+    if (!sw || !R::IsLive(sw)) return false;
+    return umg::SwitcherSetIndex(sw, 0);
+}
+
+bool RefreshBreakerCompVisual(void* widget) {
+    if (!widget) return false;
+    return component_calls::CallParamlessNamed(widget, L"upd");
+}
+
+bool PlayBreakerButtonSound(void* widget) {
+    if (!widget) return false;
+    void* snd = g_breakerButtonSound.Get();
+    if (!snd) {
+        snd = R::FindObject(L"buttonshort16", P::name::SoundWaveClass);
+        if (snd) g_breakerButtonSound.Set(snd);
+    }
+    if (snd) {
+        engine::PlaySound2D(widget, snd, 1.0f, 1.0f, 0.0f, true);
+        return true;
+    }
+    return false;
+}
 
 }  // namespace ue_wrap::power_control

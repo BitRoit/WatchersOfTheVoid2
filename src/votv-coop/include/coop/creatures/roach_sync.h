@@ -27,28 +27,29 @@ namespace coop::roach_sync {
 // Cache the session pointer (boot-lifetime; the session_holder pattern).
 void Install(coop::net::Session* session);
 
-// 1 Hz driver (TickGameplay, game thread).
+// TickGameplay driver (game thread).
 //
 // HOST: poll the roaches array and broadcast a PAGED full snapshot -- RoachState carries a seq, a
 // page, and per roach a location and scale -- on a population change, on drift, and as a periodic
 // keepalive.
 //
-// CLIENT: liveness-scan the tracked mirror set and send a RoachConsumed intent for a roach eaten or
-// stomped locally. Client SUPPRESSION itself lives in coop/world/spawn_authority: it refuses the
-// cockroachMaster_C and ticker_roachSummoner_C ticks, summonRoach, and the three looping timer
-// delegates, which fire independently of the tick. Interaction events, an eat or a stomp, are not
-// tick-driven and stay native.
+// CLIENT: interpolate admitted mirrors every frame; at 1 Hz check for local consumption, retry
+// pending samples and attempt bounded native births. Horizontal yaw is estimated from successive
+// host positions, while existing local pitch/roll is retained; the wire has no rotation, so this
+// cannot reproduce stationary turns or changing surface orientation. Client SUPPRESSION lives in
+// coop/world/spawn_authority: it refuses the cockroachMaster_C and ticker_roachSummoner_C ticks,
+// summonRoach, and three timer delegates. Native eat/stomp interactions stay available.
 void Tick();
 
 // CLIENT receive: assemble the pages of one snapshot seq and apply when complete, checked to have
 // come from the host. Game thread (event_feed drain).
 //
-// Applied by ORDINAL -- the k-th valid slot -- because both sides' arrays keep null holes, so an
-// ordinal and not a raw index is the stable mapping. With equal counts it drives positions and
-// scales onto the components; with differing counts it REBUILDS, calling the game's own
-// deleteRoach(idx, crush=false) for every local roach and then addRoach(loc, size,
-// bypassCheck=true) per snapshot entry, so the array, its count and its collision stay consistent
-// with single-player.
+// Snapshots contain positions and scales in host ordinal order, but no identity. On population
+// growth the existing prefix is retained, matching native append behavior; on shrink an ordered
+// proximity match chooses survivors. Simultaneous births/deletions and nearby roaches are therefore
+// ambiguous. Unmatched components use the game's deleteRoach(idx, crush=false) and missing entries
+// use addRoach(loc, size, bypassCheck=true). Native camera, population and placement gates can refuse
+// an add, so admission is checked and missing entries retry without rebuilding the survivors.
 void OnState(const coop::net::RoachStatePayload& payload);
 
 // HOST receive: a client consumed a roach locally, by eating or stomping it -- delete the nearest

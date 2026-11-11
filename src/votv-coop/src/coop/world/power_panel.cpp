@@ -16,16 +16,25 @@
 
 #include "ue_wrap/core/cached_obj_ref.h"
 #include "ue_wrap/core/log.h"
+#include "ue_wrap/core/reflection.h"
+#include "ue_wrap/core/reflection_props.h"
 #include "ue_wrap/core/script_gate.h"
 #include "ue_wrap/devices/laptop.h"
 #include "ue_wrap/devices/portable_pc.h"
 #include "ue_wrap/devices/power_control.h"
+#include "ue_wrap/engine/umg_build.h"
 #include "ue_wrap/facts/function_row.h"
+#include "ue_wrap/world/upgrades.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <deque>
+#include <iterator>
+#include <random>
+#include <utility>
 #include <vector>
 
 namespace coop::power_panel {
@@ -64,6 +73,21 @@ std::atomic<coop::net::Session*> g_session{nullptr};
 // can load the class anew and put another function at a recorded address.
 ue_wrap::CachedObjRef g_leverFn;
 ue_wrap::CachedObjRef g_pageFn;
+// Scoped flag for local page clicks driving buttonsVisibility
+bool g_pagePressActive = false;
+EL::ElementId g_pageTerminal = EL::kInvalidId;
+struct ScopedPagePress {
+    explicit ScopedPagePress(EL::ElementId terminal)
+        : previousActive(g_pagePressActive), previousTerminal(g_pageTerminal) {
+        g_pagePressActive = true;
+        g_pageTerminal = terminal;
+    }
+    ~ScopedPagePress() { g_pagePressActive = previousActive; g_pageTerminal = previousTerminal; }
+    ScopedPagePress(const ScopedPagePress&) = delete;
+    ScopedPagePress& operator=(const ScopedPagePress&) = delete;
+    bool previousActive;
+    EL::ElementId previousTerminal;
+};
 // What the panel's breakers were as each press body began, so the seam can tell what the press flipped.
 uint8_t g_leverSnap = 0;
 uint8_t g_pageSnap = 0;
@@ -111,7 +135,7 @@ bool SeqAfter(uint16_t a, uint16_t b) { return static_cast<int16_t>(static_cast<
 
 coop::net::Session* Connected() {
     auto* s = g_session.load(std::memory_order_acquire);
-    return (s && s->connected()) ? s : nullptr;
+    return (s && s->running() && s->connected()) ? s : nullptr;
 }
 
 uint8_t LocalSlot() { return coop::players::Registry::Get().LocalPeerId(); }
@@ -280,6 +304,277 @@ void HostServeOwed(coop::net::Session* s) {
     g_owed = 0;
 }
 
+// ---- breaker component restoration (R3: upgrade duration timer & throbber) -----------------
+
+constexpr int kBreakerCompCount = 5;
+
+// Helper to set switcher_button on ui_breakerComp_C (0 = idle button, 1 = throbber)
+bool SetBreakerCompSwitcher(void* widget, int32_t index) {
+    if (index == 0) return PC::ResetBreakerCompSwitcher(widget);
+    static ue_wrap::reflection::InstanceOffset s_offBreakerSwitcher{L"switcher_button"};
+    if (!widget || !ue_wrap::reflection::IsLive(widget)) return false;
+    const int32_t off = s_offBreakerSwitcher.Of(widget);
+    if (off < 0) return false;
+    void* sw = *reinterpret_cast<void* const*>(reinterpret_cast<const uint8_t*>(widget) + off);
+    if (!sw || !ue_wrap::reflection::IsLive(sw)) return false;
+    return ue_wrap::umg::SwitcherSetIndex(sw, index);
+}
+
+// ui_breakerComp uses EaseIn on a uniform random value, with an exponent that drops from 6 to 2.
+// Its endpoints lerp from 10–25s down to 1–1.5s as upg_compTime_ reaches level 16.
+float ComputeBreakerDuration(int32_t level, float randomUnit) {
+    const float alpha = std::clamp(static_cast<float>(level) / 16.0f, 0.0f, 1.0f);
+    const float minSec = 10.0f + (1.0f - 10.0f) * alpha;
+    const float maxSec = 25.0f + (1.5f - 25.0f) * alpha;
+    const float exponent = 6.0f + (2.0f - 6.0f) * alpha;
+    return minSec + (maxSec - minSec) * std::pow(std::clamp(randomUnit, 0.0f, 1.0f), exponent);
+}
+
+float ComputeBreakerDuration(int32_t level) {
+    static thread_local std::mt19937 gen{static_cast<unsigned int>(NowMs())};
+    std::uniform_real_distribution<float> dist(0.0f, 1.0f);
+    return ComputeBreakerDuration(level, dist(gen));
+}
+
+EL::ElementId CurrentPageTerminal() {
+    void* term = ue_wrap::laptop::TerminalInUse();
+    if (term && ue_wrap::portable_pc::IsPortablePc(term)) {
+        const EL::ElementId eid = EL::Registry::Get().EidForActor(term);
+        return eid == EL::kInvalidId ? coop::net::kPowerPanelTerminalUnnamed : eid;
+    }
+    return EL::kInvalidId;  // the fixed laptop
+}
+
+struct BreakerRestoreState {
+    bool active = false;
+    ue_wrap::CachedObjRef panelRef;
+    std::vector<ue_wrap::CachedObjRef> widgets;
+    uint8_t bit = 0;
+    bool startOn = false;
+    EL::ElementId terminal = EL::kInvalidId;
+    uint64_t expireMs = 0;
+};
+BreakerRestoreState g_restores[kBreakerCompCount];
+
+// If a widget cannot be reset immediately, keep its weak identity until a later safe retry. A fresh
+// native click discards this debt before its own latent action can take ownership of the switcher.
+struct BreakerWidgetCleanup {
+    ue_wrap::CachedObjRef panelRef;
+    ue_wrap::CachedObjRef widgetRef;
+};
+std::vector<BreakerWidgetCleanup> g_breakerCleanup;
+std::vector<ue_wrap::CachedObjRef> g_breakerCleanupInFlight;
+constexpr size_t kMaxBreakerWidgets = 128;
+
+void PruneBreakerCleanup() {
+    for (auto it = g_breakerCleanup.begin(); it != g_breakerCleanup.end();) {
+        if (!it->widgetRef.Get()) it = g_breakerCleanup.erase(it);
+        else ++it;
+    }
+}
+
+bool IsActiveBreakerWidget(void* widget) {
+    for (const auto& r : g_restores)
+        if (r.active)
+            for (const auto& ref : r.widgets)
+                if (ref.Is(widget)) return true;
+    return false;
+}
+
+void QueueBreakerWidgetCleanup(const ue_wrap::CachedObjRef& panelRef, const ue_wrap::CachedObjRef& widgetRef) {
+    void* widget = widgetRef.Get();
+    if (!widget || IsActiveBreakerWidget(widget)) return;
+    for (const auto& debt : g_breakerCleanup)
+        if (debt.widgetRef.Is(widget)) return;
+    g_breakerCleanup.push_back({panelRef, widgetRef});
+}
+
+// An upd/click supplies a freshly entered widget, so it can clean its own debt even if the panel
+// changed. Background retries, by contrast, require the original panel still to be current.
+void TryBreakerWidgetCleanup(void* widget, bool fresh, bool refresh) {
+    for (size_t i = 0; i < g_breakerCleanup.size(); ++i) {
+        if (!g_breakerCleanup[i].widgetRef.Is(widget)) continue;
+        const auto debt = g_breakerCleanup[i];
+        void* panel = debt.panelRef.Get();
+        if (!fresh && (!panel || PC::Panel() != panel)) return;
+        g_breakerCleanup.erase(g_breakerCleanup.begin() + i);  // engine calls can re-enter
+        g_breakerCleanupInFlight.push_back(debt.widgetRef);
+        const bool reset = PC::ResetBreakerCompSwitcher(widget);
+        bool stillOwned = false;
+        for (auto it = g_breakerCleanupInFlight.begin(); it != g_breakerCleanupInFlight.end();) {
+            if (it->Is(widget)) {
+                stillOwned = true;
+                it = g_breakerCleanupInFlight.erase(it);
+            } else ++it;
+        }
+        if (!stillOwned) return;  // a re-entrant native click or disconnect took ownership
+        if (!reset) QueueBreakerWidgetCleanup(debt.panelRef, debt.widgetRef);
+        else if (refresh && debt.widgetRef.Is(widget) && debt.panelRef.Is(panel) && PC::Panel() == panel)
+            PC::RefreshBreakerCompVisual(widget);
+        return;
+    }
+}
+
+void ForgetBreakerWidgetCleanup(void* widget) {
+    for (auto it = g_breakerCleanup.begin(); it != g_breakerCleanup.end();) {
+        if (it->widgetRef.Is(widget)) it = g_breakerCleanup.erase(it);
+        else ++it;
+    }
+    for (auto it = g_breakerCleanupInFlight.begin(); it != g_breakerCleanupInFlight.end();) {
+        if (it->Is(widget)) it = g_breakerCleanupInFlight.erase(it);
+        else ++it;
+    }
+}
+
+void RetryBreakerWidgetCleanup() {
+    PruneBreakerCleanup();
+    const auto debts = g_breakerCleanup;  // resets may invoke an upd, changing the live list
+    for (const auto& debt : debts)
+        if (void* widget = debt.widgetRef.Get()) TryBreakerWidgetCleanup(widget, false, true);
+}
+
+// A panel may be shown by a laptop and a portable PC; remember every widget whose throbber we set.
+// Weak identities avoid retaining widgets through a world change. Never show an untracked throbber.
+bool TrackBreakerWidget(BreakerRestoreState& r, void* widget) {
+    for (auto it = r.widgets.begin(); it != r.widgets.end();) {
+        if (it->Is(widget)) return true;
+        if (!it->Get()) it = r.widgets.erase(it);
+        else ++it;
+    }
+    if (r.widgets.size() >= 16) return false;
+    // A newly managed widget will be cleaned by this restore, not by an older debt.
+    ForgetBreakerWidgetCleanup(widget);
+    PruneBreakerCleanup();
+    size_t knownWidgets = g_breakerCleanup.size() + g_breakerCleanupInFlight.size();
+    for (const auto& state : g_restores) knownWidgets += state.widgets.size();
+    if (knownWidgets >= kMaxBreakerWidgets) return false;
+    r.widgets.emplace_back();
+    r.widgets.back().Set(widget);
+    if (r.widgets.back().Is(widget)) return true;
+    r.widgets.pop_back();
+    return false;
+}
+
+void ResetBreakerWidgets(const ue_wrap::CachedObjRef& panelRef, std::vector<ue_wrap::CachedObjRef>& widgets) {
+    // Queue every moved reference before the first engine call, which can re-enter the panel code.
+    for (const auto& ref : widgets) QueueBreakerWidgetCleanup(panelRef, ref);
+    for (const auto& ref : widgets)
+        if (void* widget = ref.Get()) TryBreakerWidgetCleanup(widget, false, true);
+}
+
+void ResetBreakerRestore(int compIndex) {
+    if (compIndex >= 0 && compIndex < kBreakerCompCount && g_restores[compIndex].active) {
+        auto& r = g_restores[compIndex];
+        const auto panelRef = r.panelRef;
+        auto widgets = std::move(r.widgets);
+        r.active = false;
+        r.panelRef.Reset();
+        r.widgets.clear();
+        ResetBreakerWidgets(panelRef, widgets);
+    }
+}
+
+void ResetAllBreakerRestores() {
+    for (int i = 0; i < kBreakerCompCount; ++i) {
+        ResetBreakerRestore(i);
+    }
+}
+
+// Cancel only when the panel or the effective state of this breaker has changed since the click.
+// This distinguishes a host flip from acknowledgement of a client's already-predicted press.
+void CancelChangedBreakerRestores(void* panel, uint8_t mask) {
+    for (int i = 0; i < kBreakerCompCount; ++i) {
+        const auto& r = g_restores[i];
+        if (r.active && (!r.panelRef.Is(panel) || ((mask & r.bit) != 0) != r.startOn)) {
+            ResetBreakerRestore(i);
+        }
+    }
+}
+
+void TickBreakerRestores() {
+    // A host may remain running after its last peer leaves, without a session teardown.
+    if (!Connected()) {
+        ResetAllBreakerRestores();
+        RetryBreakerWidgetCleanup();
+        return;
+    }
+    RetryBreakerWidgetCleanup();
+    if (std::none_of(std::begin(g_restores), std::end(g_restores),
+                     [](const BreakerRestoreState& r) { return r.active; })) return;
+    const uint64_t now = NowMs();
+    void* panel = PC::EnsureResolved() ? PC::Panel() : nullptr;
+
+    for (int i = 0; i < kBreakerCompCount; ++i) {
+        auto& r = g_restores[i];
+        if (!r.active) continue;
+
+        if (!panel || !r.panelRef.Is(panel)) {
+            ResetBreakerRestore(i);
+            continue;
+        }
+
+        uint8_t cur = 0;
+        if (!PC::ReadPress(panel, cur) || ((cur & r.bit) != 0) != r.startOn) {
+            ResetBreakerRestore(i);
+            continue;
+        }
+
+        if (now >= r.expireMs) {
+            const uint8_t bit = r.bit;
+            const EL::ElementId terminal = r.terminal;
+            const auto panelRef = r.panelRef;
+            auto widgets = std::move(r.widgets);
+            r.active = false;
+            r.panelRef.Reset();
+            r.widgets.clear();
+
+            // Native completion resets the switcher, checks waterlogging, reports its hint or
+            // flips the selected breaker, and calls buttonsVisibility in the game's own order.
+            // Keep the original panel snapshot and terminal for the client-intent seam.
+            g_pageSnap = cur;
+            auto result = PC::BreakerCompFinish::Unavailable;
+            for (auto& ref : widgets) {
+                void* widget = ref.Get();
+                int32_t currentIndex = -1;
+                if (!widget || !PC::ReadBreakerCompIndex(widget, currentIndex) || currentIndex != i) continue;
+                ScopedPagePress mark(terminal);
+                result = PC::FinishBreakerComp(widget, panel);
+                if (result != PC::BreakerCompFinish::Unavailable) break;
+            }
+            // The player can close the breaker page before its countdown ends.
+            // With no usable widget, keep the previous guarded panel-only restore.
+            bool usedPanelOnly = false;
+            if (result == PC::BreakerCompFinish::Unavailable && Connected() &&
+                panelRef.Is(PC::Panel())) {
+                uint8_t before = 0;
+                bool waterlogged = false, disabled = false;
+                if (PC::ReadPress(panel, before) && ((before ^ cur) & bit) == 0 &&
+                    PC::ReadWaterlogged(panel, waterlogged) && !waterlogged &&
+                    PC::ReadDisabled(panel, disabled) && !disabled &&
+                    PC::WritePress(panel, static_cast<uint8_t>((before ^ bit) & kMaskBits))) {
+                    g_pageSnap = before;
+                    ScopedPagePress mark(terminal);
+                    usedPanelOnly = true;
+                    result = PC::ButtonsVisibility(panel) ? PC::BreakerCompFinish::Ran : PC::BreakerCompFinish::Faulted;
+                }
+            }
+            ResetBreakerWidgets(panelRef, widgets);
+
+            const char* const route = usedPanelOnly ? "panel-only restore" : "native continuation";
+            if (result == PC::BreakerCompFinish::Ran) {
+                uint8_t after = cur;
+                PC::ReadPress(panelRef.Get(), after);
+                UE_LOGI("power_panel: breaker comp %d (bit 0x%02X) %s ran: 0x%02X -> 0x%02X",
+                        i, bit, route, cur, after);
+            } else if (result == PC::BreakerCompFinish::Faulted) {
+                UE_LOGW("power_panel: breaker comp %d %s faulted; its effects are uncertain", i, route);
+            } else {
+                UE_LOGW("power_panel: breaker comp %d native continuation became unavailable; press again", i);
+            }
+        }
+    }
+}
+
 // ---- a client ------------------------------------------------------------------------------------------------
 
 // The canonical with my untaken presses on top, onto the panel when they differ. A fresh canonical also plays the
@@ -288,6 +583,7 @@ void ClientApplyModel(void* panel, const PowerPanelPayload& p, bool fresh) {
     uint8_t model = static_cast<uint8_t>(p.bits & kMaskBits);
     for (const Pending& d : g_pending) model ^= d.bits;
     const bool disabled = (p.flags & kFlagDisabled) != 0;
+    CancelChangedBreakerRestores(panel, model);
     uint8_t cur = 0;
     bool curDisabled = false;
     if (!PC::ReadPress(panel, cur) || !PC::ReadDisabled(panel, curDisabled)) return;
@@ -341,11 +637,110 @@ sg::Verdict OnLeverPre(const sg::Call& call) {
     return sg::Verdict::Run;
 }
 
-// Every entry of the page's ubergraph, its click and its latent flip after the delay alike, so the snapshot is
-// the breakers as the flip's own entry began.
+// Keep observing the native latent continuation when the replacement cannot safely start.
 sg::Verdict OnPagePre(const sg::Call& call) {
     if (!g_pageFn.Is(call.function)) g_pageFn.Set(call.function);
     if (void* panel = PC::Panel()) PC::ReadPress(panel, g_pageSnap);
+    return sg::Verdict::Run;
+}
+
+// A click on any breaker component's toggle button on the laptop / portable PC breaker page.
+// Displays the throbber (switcher_button index 1) and enforces the upgrade duration timer
+// computed from upg_compTime_ (index 26, scaling from 10-25s down to 1-1.5s). Breakers flip only
+// upon timer completion, preventing premature (0.0s) restoration and respecting upgrades.
+sg::Verdict OnBreakerButtonClickPre(const sg::Call& call) {
+    // The watch outlives a session. With no pump to advance our timer, leave the native button alone.
+    if (call.object) {
+        TryBreakerWidgetCleanup(call.object, true, false);
+        // If cleanup failed, a native fallback may now start its own delay on this widget.
+        ForgetBreakerWidgetCleanup(call.object);
+    }
+    if (!Connected()) {
+        ResetAllBreakerRestores();
+        ForgetBreakerWidgetCleanup(call.object);
+        return sg::Verdict::Run;
+    }
+    if (!call.object) return sg::Verdict::Run;
+
+    void* panel = PC::EnsureResolved() ? PC::Panel() : nullptr;
+    if (!panel) return sg::Verdict::Run;
+
+    int32_t compIndex = -1;
+    if (!PC::ReadBreakerCompIndex(call.object, compIndex)) return sg::Verdict::Run;
+    if (compIndex < 0 || compIndex >= kBreakerCompCount) return sg::Verdict::Run;
+    const uint8_t bit = PC::BreakerBitForCompIndex(compIndex);
+    if (!bit) return sg::Verdict::Run;
+
+    // If already restoring this breaker component, ignore repeated clicks
+    auto& r = g_restores[compIndex];
+    if (r.active) {
+        if (r.panelRef.Is(panel)) {
+            if (TrackBreakerWidget(r, call.object)) SetBreakerCompSwitcher(call.object, 1);
+            return sg::Verdict::Cancel;
+        }
+        ResetBreakerRestore(compIndex);
+        ForgetBreakerWidgetCleanup(call.object);
+    }
+
+    // If the exact native completion cannot be called safely, leave the whole click and its
+    // native latent delay alone, including its waterlogged hint and generator/lockout rules.
+    if (!PC::CanFinishBreakerComp(call.object, panel)) return sg::Verdict::Run;
+
+    // Read upgrade level for upg_compTime_ (panel index 26)
+    int32_t level = 0;
+    uint8_t cur = 0;
+    if (!ue_wrap::upgrades::ReadLevel(26, &level)) return sg::Verdict::Run;
+    const EL::ElementId terminal = CurrentPageTerminal();
+    if (!Connected() || PC::Panel() != panel || !PC::ReadPress(panel, cur)) return sg::Verdict::Run;
+
+    const float durationSec = ComputeBreakerDuration(level);
+    const uint64_t durationMs = static_cast<uint64_t>(durationSec * 1000.0f);
+
+    // Publish the timer before the engine call: an update or repeated click can re-enter it.
+    r.panelRef.Set(panel);
+    if (!r.panelRef.Is(panel) || !TrackBreakerWidget(r, call.object)) {
+        r.panelRef.Reset();
+        r.widgets.clear();
+        return sg::Verdict::Run;
+    }
+    r.active = true;
+    r.bit = bit;
+    r.startOn = (cur & bit) != 0;
+    r.terminal = terminal;
+    r.expireMs = NowMs() + durationMs;
+
+    if (!SetBreakerCompSwitcher(call.object, 1)) {
+        ResetBreakerRestore(compIndex);
+        ForgetBreakerWidgetCleanup(call.object);
+        return sg::Verdict::Run;  // native event and its observed latent continuation
+    }
+    if (!r.active || !r.panelRef.Is(panel) || !Connected()) return sg::Verdict::Cancel;
+    PC::PlayBreakerButtonSound(call.object);
+
+    UE_LOGI("power_panel: breaker comp %d (bit 0x%02X) restoration started: level %d, duration %.2f s",
+            compIndex, bit, level, durationSec);
+
+    // Cancel the native Blueprint event body so ExecuteUbergraph_ui_breakerComp(1264) never runs,
+    // avoiding duplicate unmanaged FLatentActionManager Delays.
+    return sg::Verdict::Cancel;
+}
+
+// Maintain managed throbbers and clean only known managed debt; native fallback may also be spinning.
+sg::Verdict OnBreakerUpdPre(const sg::Call& call) {
+    if (!call.object) return sg::Verdict::Run;
+    if (!Connected()) {
+        TryBreakerWidgetCleanup(call.object, true, false);
+        return sg::Verdict::Run;
+    }
+    int32_t compIndex = -1;
+    if (PC::ReadBreakerCompIndex(call.object, compIndex) && compIndex >= 0 && compIndex < kBreakerCompCount) {
+        auto& r = g_restores[compIndex];
+        if (r.active && r.panelRef.Is(PC::Panel()) && TrackBreakerWidget(r, call.object)) {
+            SetBreakerCompSwitcher(call.object, 1);
+            return sg::Verdict::Run;
+        }
+    }
+    TryBreakerWidgetCleanup(call.object, true, false);
     return sg::Verdict::Run;
 }
 
@@ -356,9 +751,11 @@ sg::Verdict OnSeamPre(const sg::Call& call) {
     void* const leverFn = g_leverFn.Get();
     void* const pageFn = g_pageFn.Get();
     const bool lever = leverFn && sg::IsBodyActive(leverFn);
-    const bool page = !lever && pageFn && sg::IsBodyActive(pageFn);
+    const bool page = !lever && (g_pagePressActive || (pageFn && sg::IsBodyActive(pageFn)));
     uint8_t cur = 0;
     if (!PC::ReadPress(call.object, cur)) return sg::Verdict::Run;
+    const bool currentPanel = PC::Panel() == call.object;
+    if (currentPanel) CancelChangedBreakerRestores(call.object, cur);
     if (s->role() == coop::net::Role::Host) {
         if (lever) {  // a lever press, the host's own or a client's it runs: every other peer plays its click
             g_leverBits = static_cast<uint8_t>((cur ^ g_leverSnap) & kMaskBits);
@@ -381,14 +778,7 @@ sg::Verdict OnSeamPre(const sg::Call& call) {
     p.flags = page ? kFlagPage : 0;
     p.leverSlot = kNoSlot;
     p.terminal = EL::kInvalidId;
-    if (page) {
-        // The page is worked through the laptop or a portable PC; the host measures the presser against it.
-        void* term = ue_wrap::laptop::TerminalInUse();
-        if (term && ue_wrap::portable_pc::IsPortablePc(term)) {
-            const EL::ElementId eid = EL::Registry::Get().EidForActor(term);
-            p.terminal = eid == EL::kInvalidId ? coop::net::kPowerPanelTerminalUnnamed : eid;
-        }
-    }
+    if (page) p.terminal = g_pagePressActive ? g_pageTerminal : CurrentPageTerminal();
     p.seq = ++g_seq;
     g_pending.push_back({p.seq, delta});
     s->SendReliableToSlot(0, coop::net::ReliableKind::PowerControlState, &p, sizeof(p));
@@ -403,9 +793,13 @@ sg::Verdict OnSeamPre(const sg::Call& call) {
 // for what else solar() does, and its breakers are put back to the canonical after (ReassertCanonical).
 sg::Verdict OnOwnEdgePre(const sg::Call& call) {
     auto* s = Connected();
-    if (!s || s->role() != coop::net::Role::Client || call.fromOurCode) return sg::Verdict::Run;
-    if (!coop::net_pump::IsInAnnouncedWorld(call.object)) return sg::Verdict::Run;
+    if (!s) return sg::Verdict::Run;
     const bool lockout = call.tag == 0x50505650 /*'PPVP'*/;
+    if (s->role() != coop::net::Role::Client || call.fromOurCode) {
+        if (!lockout) ResetAllBreakerRestores();
+        return sg::Verdict::Run;
+    }
+    if (!coop::net_pump::IsInAnnouncedWorld(call.object)) return sg::Verdict::Run;
     if (++(lockout ? g_refusedLockouts : g_refusedBlackouts) == 1)
         UE_LOGI("power_panel: this client refuses its own %s -- the host's panel is its author",
                 lockout ? "virus_pb lockout" : "solar() blackout");
@@ -414,6 +808,10 @@ sg::Verdict OnOwnEdgePre(const sg::Call& call) {
 
 UE_FACT_FN(kRowButtonsVisibility, "power_panel", L"powerControl_C", L"buttonsVisibility", Declared);
 UE_FACT_FN(kRowActionOptionIndex, "power_panel", L"powerControl_C", L"actionOptionIndex", Declared);
+UE_FACT_FN(kRowBreakerButtonClick, "power_panel", L"ui_breakerComp_C",
+           L"BndEvt__ui_breakerComp_button_toggle_K2Node_ComponentBoundEvent_0_OnButtonClickedEvent__DelegateSignature",
+           Declared);
+UE_FACT_FN(kRowBreakerUpd, "power_panel", L"ui_breakerComp_C", L"upd", Declared);
 UE_FACT_FN(kRowUbergraphBreakerComp, "power_panel", L"ui_breakerComp_C", L"ExecuteUbergraph_ui_breakerComp",
            Declared);
 UE_FACT_FN(kRowSolar, "power_panel", L"powerControl_C", L"solar", Declared);
@@ -427,6 +825,8 @@ struct WatchDef {
 constexpr WatchDef kWatches[] = {
     { &kRowButtonsVisibility,    0x50504256 /*'PPBV'*/, &OnSeamPre },
     { &kRowActionOptionIndex,    0x5050414F /*'PPAO'*/, &OnLeverPre },
+    { &kRowBreakerButtonClick,   0x50504243 /*'PPBC'*/, &OnBreakerButtonClickPre },
+    { &kRowBreakerUpd,           0x50505550 /*'PPUP'*/, &OnBreakerUpdPre },
     { &kRowUbergraphBreakerComp, 0x50505047 /*'PPPG'*/, &OnPagePre },
     { &kRowSolar,                0x5050534C /*'PPSL'*/, &OnOwnEdgePre },
     { &kRowVirusPb,              0x50505650 /*'PPVP'*/, &OnOwnEdgePre },
@@ -448,6 +848,7 @@ void Install(coop::net::Session* session) {
 }
 
 void Tick() {
+    TickBreakerRestores();
     auto* s = Connected();
     if (s && s->role() == coop::net::Role::Host) {
         HostDrainWaiting(s);
@@ -518,6 +919,9 @@ bool LastCanonical(uint8_t& bits, bool& disabled) {
 }
 
 void OnDisconnect() {
+    ResetAllBreakerRestores();
+    g_breakerCleanup.clear();
+    g_breakerCleanupInFlight.clear();
     if (g_pressesSent || g_canonicalsApplied || g_refusedBlackouts || g_refusedLockouts || g_pressesTaken ||
         g_pressesRefused)
         UE_LOGI("power_panel: session end -- presses sent %llu, canonicals applied %llu, own blackouts refused %llu, "
@@ -537,6 +941,8 @@ void OnDisconnect() {
     g_takingFor = 0;
     g_leverFn.Reset();
     g_pageFn.Reset();
+    g_pagePressActive = false;
+    g_pageTerminal = EL::kInvalidId;
     for (int slot = 0; slot < coop::net::kMaxPeers; ++slot) {
         g_waiting[slot].clear();
         g_rate[slot].Reset();

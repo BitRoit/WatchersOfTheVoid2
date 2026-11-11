@@ -8,6 +8,7 @@ public:
     void* local=nullptr;std::array<void*,kMaxPeers> puppets{};
     static Registry& Get(){static Registry value;return value;}
     bool IsLocal(void* actor){return actor && actor==local;}
+    void* Local(){return local;}
     uint8_t PeerIdOfActor(void* actor){for(uint8_t slot=0;slot<kMaxPeers;++slot)if(actor && puppets[slot]==actor)return slot;return 255;}
 };
 }

@@ -54,6 +54,7 @@
 #include "coop/props/dingus_music_sync.h"
 #include "coop/props/llama_sync.h"
 #include "coop/props/watoy_sync.h"
+#include "coop/props/roomba_sync.h"
 #include "coop/props/sponge_effects_sync.h"
 #include "coop/props/water_pour_sync.h"
 #include "coop/props/prop_record_refresh.h"  // a drive box or reel case republishes its record in place
@@ -396,7 +397,7 @@ void Install(coop::net::Session& session) {
     coop::host_spawn_watcher::Install(&session);  // HOST mirrors the ambient spawner outputs (the pinecone scare) the line above cancels on the client -- BeginDeferred POST -> PropSpawn-by-eid
     ue_wrap::garage::Install();
     ue_wrap::roomba::Install();
-    ue_wrap::roomba::SetClientRole(session.role() == coop::net::Role::Client);
+    coop::roomba_sync::Install(&session);
     coop::prop_spawn_authoring::Install(session.role() == coop::net::Role::Client);  // CLIENT: the script-gate bracket that tells a PLAYER's spawn (menu / toolgun) from the world's own -- read by the seam below
     coop::prop_drop_intent::Install(&session);  // CLIENT FinishSpawn post-hook (chains after host_spawn_watcher's) -> place detect -> host DROP INTENT
     coop::prop_action_sync::Install(&session);
@@ -842,7 +843,7 @@ DisconnectStats DisconnectAll() {
     coop::balance_sync::OnDisconnect();  // reset the balance broadcast dedup
     coop::credit_intent::OnDisconnect();
     coop::props::prop_food_sync::OnDisconnect();
-    ue_wrap::roomba::SetClientRole(false);
+    coop::roomba_sync::OnDisconnect();
     // Last, after every element drain: the client's transfer state, its received identity map and
     // the ephemeral zcoop_<pid> slot the join wrote. The map's binds resolve against Elements, so
     // it must outlive their drain; the slot file is read once at the join and never again, and a

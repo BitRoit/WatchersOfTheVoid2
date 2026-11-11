@@ -6,7 +6,18 @@ New-Item -ItemType Directory -Force -Path $output | Out-Null
 Push-Location $root
 try {
  if(-not(Get-Command cl -ErrorAction SilentlyContinue)){. (Join-Path $root '../_toolchain/env.ps1')}
- & cl /nologo /std:c++20 /EHsc /Gy /utf-8 /I agent/tests/flashlight_click_stubs /I src/votv-coop/include "/Fo$output/flashlight_click.obj" "/Fe$output/flashlight_click.exe" agent/tests/flashlight_click_test.cpp /link /OPT:REF
+ $atvSource=Get-Content -LiteralPath 'src/votv-coop/src/coop/interactables/atv_sync.cpp' -Raw
+ $atvLights=[regex]::Match($atvSource,'(?ms)^static void ApplyRemoteLights\(.*?^\}').Value
+ if(!$atvLights){throw 'ATV receive helper not found'}
+ [IO.File]::WriteAllText((Join-Path $output 'atv_lights.inc'),$atvLights)
+ $atvWrapper=Get-Content -LiteralPath 'src/votv-coop/src/ue_wrap/devices/atv.cpp' -Raw
+ $atvSetLights=[regex]::Match($atvWrapper,'(?ms)^void SetLights\(.*?^\}').Value
+ if(!$atvSetLights){throw 'ATV light presentation wrapper not found'}
+ [IO.File]::WriteAllText((Join-Path $output 'atv_set_lights.inc'),$atvSetLights)
+ $atvEngine=[regex]::Match($atvWrapper,'(?ms)^static ue_wrap::CachedObjRef g_engineAudioRange;.*?^bool ConfigureEngineAudio\(.*?^\}').Value
+ if(!$atvEngine){throw 'ATV engine audio binding not found'}
+ [IO.File]::WriteAllText((Join-Path $output 'atv_engine_audio.inc'),$atvEngine)
+ & cl /nologo /std:c++20 /EHsc /Gy /utf-8 /I $output /I agent/tests/flashlight_click_stubs /I src/votv-coop/include "/Fo$output/flashlight_click.obj" "/Fe$output/flashlight_click.exe" agent/tests/flashlight_click_test.cpp /link /OPT:REF
  if($LASTEXITCODE){throw 'Flashlight click compile failed'}
  & "$output/flashlight_click.exe"
  if($LASTEXITCODE){throw 'Flashlight click regression failed'}
@@ -22,6 +33,7 @@ try {
    @{Name='attenuation';Changes=@(@('if(!g_attenuation.Current()){','if(!g_attenuation.object.Raw()){'))},
    @{Name='reentry';Changes=@(@('row.revision==revision && row.busy &&','true &&'))},
    @{Name='position';Changes=@(@('!std::isfinite(position.X)','false'))},
+   @{Name='atv';Changes=@(@('if (!(dx * dx + dy * dy + dz * dz < 1000.f * 1000.f)) return;',''))},
    @{Name='no-fallback';Changes=@(@(' || !g_attenuation.Current()',''),@(' || !attenuation.Current()',''))}
   )
   foreach($control in $controls){
@@ -30,7 +42,7 @@ try {
    foreach($change in $changes){if(-not $mutant.Contains($change[0])){throw "Missing click control anchor: $($control.Name)"};$mutant=$mutant.Replace($change[0],$change[1])}
    $name='fault_'+$control.Name;$path=Join-Path $output ($name+'.cpp');[IO.File]::WriteAllText($path,$mutant)
    $header=Join-Path $output ($name+'.h');[IO.File]::WriteAllText($header,('#define FLASHLIGHT_CLICK_SOURCE "'+$path.Replace('\','/')+'"'+[Environment]::NewLine))
-   & cl /nologo /std:c++20 /EHsc /Gy /utf-8 "/FI$header" /I agent/tests/flashlight_click_stubs /I src/votv-coop/include "/Fo$output/$name.obj" "/Fe$output/$name.exe" agent/tests/flashlight_click_test.cpp /link /OPT:REF
+   & cl /nologo /std:c++20 /EHsc /Gy /utf-8 "/FI$header" /I $output /I agent/tests/flashlight_click_stubs /I src/votv-coop/include "/Fo$output/$name.obj" "/Fe$output/$name.exe" agent/tests/flashlight_click_test.cpp /link /OPT:REF
    if($LASTEXITCODE){throw "Click control compile failed: $name"}
    $saved=$ErrorActionPreference
    try{$ErrorActionPreference='Continue';$report=& "$output/$name.exe" $control.Name 2>&1 | Out-String;$code=$LASTEXITCODE}finally{$ErrorActionPreference=$saved}
@@ -39,7 +51,7 @@ try {
    Write-Host ('PASS fault '+$control.Name+': '+[regex]::Match($report,'FAIL [^\r\n]+').Value)
   }
  }
- if($CompileSources){foreach($file in @('coop/player/flashlight_click_sound','coop/player/item_activate')){
+ if($CompileSources){foreach($file in @('coop/player/flashlight_click_sound','coop/player/item_activate','coop/interactables/atv_sync','ue_wrap/devices/atv')){
   $name=$file.Replace('/','_')
   & cl /nologo /std:c++20 /EHsc /utf-8 /c /I src/votv-coop/include "/Fo$output/$name.obj" "src/votv-coop/src/$file.cpp"
   if($LASTEXITCODE){throw "Flashlight click production compile failed: $file"}

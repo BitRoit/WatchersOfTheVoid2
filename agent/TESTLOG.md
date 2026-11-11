@@ -1,5 +1,95 @@
 # Release 0.9.2163 qualified offline (28 October 2026)
 
+## Breaker and satellite-console follow-up — 11 November 2026
+
+- The refreshed desktop installer archive matched all nine files after
+  extraction. Its installer replaced the DLL in a disposable profile and
+  preserved the prior DLL as a hash-verified rollback backup. Re-ran the
+  breaker, satellite console, Broomba, roach and flashlight/ATV checks.
+- The 16:53 run loaded `051AD711`. Both profiles and the desktop launcher's
+  former copy source at `build/votv-coop/Release/main.dll` matched that hash.
+  Restored `3CC1FF65` in both profiles and removed the automatic copy and
+  configuration writes from the launcher.
+- Verified the desktop command resolves to the edited script. Windows
+  PowerShell 5.1 exercised Both, Host, Client and Kill with simulated process
+  calls. Both installed DLLs, both `multivoid.ini` files and `Engine.ini`
+  retained their hashes. Game launch and gameplay were not exercised.
+- PWR3: the previous host log recorded three completed timers and an all-on
+  mask. It did not capture the exact symptom the player saw. The cooked
+  breaker graph checks waterlogging at completion, can issue a hint, and calls
+  the native power-panel update on the dry path. The old replacement omitted
+  that native continuation.
+- PWR3: compared the guarded entry against the cooked `ui_breakerComp`
+  graph. Delay spans offsets 1737 to 1795, stores linkage 182, and its
+  continuation starts with the switcher reset. The production-body fixture
+  exercises a relocated linkage, wet and dry completion, a disabled panel,
+  widget retirement, contention and partial-fault handling.
+  All ten fault controls and both production-header compiles passed.
+- SCX1: the 20:12 failed export on `92F7001D` ejected and reinserted the
+  same floppy with 25 writes and one data row. The cooked console reads its
+  current dish again at the final write check. The cooked panel's `con` can
+  call `init` with no dish on overlap, and the display showed `root` after
+  the failure. The exact initiating overlap was not logged.
+- SCX1: 23 callback groups, four native input checks, ten native lifetime
+  cases, 25 fault controls and 14 delivery cases passed. The two new fault
+  controls caught loss of the busy context guard and the puppet overlap
+  filter. Production-header compile passed. Gameplay remains unverified.
+- The older standalone serverbox harness lacks three repair-UI doubles and
+  User32 linkage. The console clear asset script lacks its `_research`
+  dependency. Neither was used to qualify SCX1.
+- Combined Release 0.9.0n b2217 linked and passed loader ABI verification
+  with 862 source entries. SHA256
+  `3CC1FF65D8AD95BA17E0C012253166E9BE3F631A52181AD7C0553375B7A621EF`.
+  Both installed profile DLLs were checked and still match `92F7001D`.
+
+## Antigravity stabilization handoff — 10 November 2026 evening
+
+- PWR2: production breaker fixture passed nine fault controls including the
+  native fallback spinner, retry after a failed reset, panel replacement,
+  last-peer departure and re-entrant native fallback.
+- ROACH2: production roach fixture passed twelve fault controls and the cooked
+  native capture check. Fixture uses the production interpolation window.
+- ATVA2: flashlight/ATV suite passed 13 groups and 11 fault controls with the
+  production visual wrapper included. The wrapper requests `Upd Lights` and
+  leaves state retryable when the visual function is unavailable. ATV recovery
+  and articulated spawn suites passed. Cooked 0.9.0n ATV bytecode confirms
+  `loadLights` jumps from 25541 to 21999, ahead of the two native 2D sound
+  calls. `Upd Lights` is a separate visual function with a battery check.
+- Release link and loader ABI check passed with 862 source entries and SHA256
+  `92F7001DE5B21EB846AF8F59FB8F57033D84E6EF1FFCDBDA6E4E92BD38D97208`.
+  MSVC emitted its existing exception-flag override warning D9025.
+  Installation and gameplay checks are pending.
+
+## Four-lane playtest follow-up — 10 November 2026
+
+- BRM1: actual Broomba wrapper and sync callback fixture passed 1,056 checks
+  and rejected six source faults. Integrated host/receiver prop-drive fixture
+  passed host publication, client parking/torque suppression, interpolation,
+  held-prop exclusion and idle release.
+- PWR1: `run_power_panel_regression.ps1 -FaultControls` passed five fault
+  controls and compiled both production units. Native light-switch and
+  light-identity regressions passed. Fixtures cover cancellation, local
+  fallback and upgrade easing. Live widget and timing acceptance is pending.
+  Host authorization still checks terminal reach at completion and does not
+  independently validate the elapsed client timer. Existing wet/disabled
+  admission policy remains in force.
+- ROACH1: `run_roach_sync.ps1` passed the production-path fixture for slow
+  motion, population retention, silent native add refusal, partial retry,
+  bounded births, local consumption, stale world/serial and malformed pages.
+  The prior 14:04 client log recorded repeated population rebuilds beginning
+  from zero; the actual reason for native refusal in that playtest is unknown.
+- ATVA1: `run_flashlight_click.ps1 -CompileSources -FaultControls` passed 13
+  groups and rejected 11 controls, including removal of the ATV cutoff.
+  Production receive helper and engine emitter binding were exercised with
+  mocked engine boundaries. Steering/join C++ checks passed, including honk
+  retention. The runner's subsequent native capture step could not find its
+  hard-coded Python 3.15 executable.
+- Release CMake build and `verify_current_build.ps1` passed for
+  `0.9.0n b2217`, 862 source entries, SHA256
+  `39E8D353AF4CD64BB77D84CB3EEC7473B9C85115BB3A9423CDDCEE5DE9FD7890`.
+  No runtime launch, rendered acceptance, profile install or friend ZIP
+  was performed for this candidate.
+
 ## FL2 remote flashlight absolute-transform verification — 4 November 2026
 
 PASS `agent/tests/run_flashlight_absolute.ps1`: directly includes production

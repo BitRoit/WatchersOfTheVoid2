@@ -3,11 +3,11 @@
 //
 // Plays the game's own `flashlight` USoundWave through UGameplayStatics::PlaySoundAtLocation
 // with a USoundAttenuation we build at runtime, so no cooked `att_*` content asset is borrowed.
-// Sphere, inverse distance, a third of the baseline in ue_wrap::engine::SoundAttenuationConfig:
-// full volume out to 6.67 m and silence by ~73 m, where the baseline reaches 20 m and 220 m.
-// That baseline carries a click across the whole outdoor map, which is right for the local
-// player and far too generous for someone else's toggle. SpawnSoundAttenuation pins the object
-// for the process, since a C++ static is invisible to UE's reachability scan.
+// Sphere, linear distance (distanceAlgorithm = 0): extents[0] = 100 cm (1 m) full volume,
+// falloffDistance = 900 cm (9 m), with total inaudibility at >= 1000 units (10 m).
+// That baseline guarantees clicks do not propagate to players 1000+ units away.
+// SpawnSoundAttenuation pins the object for the process, since a C++ static is invisible to
+// UE's reachability scan.
 //
 // Only a state CHANGE clicks: a hold-F mode-change packet keeps state=on and moves the cones
 // alone. The last applied state is kept per peer SLOT rather than per puppet pointer, which
@@ -28,5 +28,8 @@ namespace coop::flashlight_click_sound {
 // replacement retires the latch, and nested calls cannot complete over a newer state.
 // Game thread only.
 void PlayIfStateChanged(void* puppetActor, uint8_t peerSlot, bool newState);
+
+// Play one admitted remote ATV headlight edge. The ATV receiver owns the baseline.
+void PlayAtvHeadlightClick(void* atvActor, bool enabled);
 
 }  // namespace coop::flashlight_click_sound

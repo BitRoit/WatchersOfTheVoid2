@@ -12,6 +12,7 @@
 #include "coop/net/protocol.h"  // AtvConditionEditPayload, an unsent service
 #include "coop/interactables/atv_authority.h"  // AtvRequest
 #include "coop/net/intent_bucket.h"
+#include "ue_wrap/core/cached_obj_ref.h"
 #include "ue_wrap/core/types.h"
 #include "ue_wrap/devices/atv_condition.h"
 
@@ -94,6 +95,11 @@ struct AtvEntry {
     int      stallPackets = 0;     // consecutive packets in which the error refused to shrink
     bool     haveLastSync = false;
     bool     honkPulse = false;    // the local driver honked; the next pose packet carries the edge
+    ue_wrap::CachedObjRef headlightAudioActor;
+    uint8_t  headlightAudioSyncer = 0xFF;
+    bool     headlightAudioState = false;
+    ue_wrap::CachedObjRef engineAudioActor;
+    uint64_t engineAudioRetryMs = 0;
     uint8_t  lastCockpit = 0;      // idle gate: lights/turbo/radio, honk excluded
     uint8_t  lastModules = 0;
     int16_t  lastSteering = coop::net::kAtvSteeringUnavailable;

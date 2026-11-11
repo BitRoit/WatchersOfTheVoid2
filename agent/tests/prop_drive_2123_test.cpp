@@ -24,11 +24,14 @@ bool present = true, remoteHeld = false, simulates = true, frozen = false;
 ue_wrap::engine::MainPlayerGrabState grab{};
 int writes = 0, parks = 0, unparks = 0;
 float x = 0;
+bool worldEnabled = false;
+int worldToken;
+void* outerToken = nullptr;
 }
 namespace ue_wrap::reflection {
 std::wstring ClassNameOf(void*) { return L"Aprop_C"; }
 int32_t FindParamOffset(void*, const wchar_t*) { return -1; }
-void* OuterOf(void*) { return nullptr; }
+void* OuterOf(void*) { return test::outerToken; }
 int32_t InternalIndexOf(void* p) { return p == &test::actor ? 1 : 2; }
 bool IsLiveByIndex(void* p, int32_t index) {
     return test::present && ((p == &test::actor && index == 1) || (p == &test::mesh && index == 2));
@@ -37,8 +40,8 @@ int32_t SlotSerial(int32_t i) { return i == 1 ? test::serial : test::meshSerial;
 int32_t AllocateSlotSerial(int32_t i) { return SlotSerial(i); }
 }
 namespace ue_wrap::world_identity {
-void* CurrentWorld() { return nullptr; }
-void* WorldOf(void*) { return nullptr; }
+void* CurrentWorld() { return test::worldEnabled ? &test::worldToken : nullptr; }
+void* WorldOf(void* actor) { return test::worldEnabled && actor == &test::actor ? &test::worldToken : nullptr; }
 }
 namespace ue_wrap::game_thread { bool IsDefinitelyOffGameThread() { return false; } }
 namespace ue_wrap::hot_path {
@@ -75,6 +78,7 @@ std::wstring KeyToWString(const net::WireKey&) { return L""; }
 namespace coop::prop_element_tracker {
 void* FindLiveActorByKey(const std::wstring&) { return nullptr; }
 element::ElementId GetPropElementIdForActor(void*) { return 1; }
+std::wstring MarkPropElement(void*, const std::wstring& key, const std::wstring&, EnrollSource) { return key; }
 }
 namespace coop::element {
 Registry::Registry() = default;
@@ -227,11 +231,22 @@ int main() {
     H::g_driven[0].lastSendMs = coop::active_drive::NowMs() - 2000;
     session.sendOk = true; H::Tick(session);
     assert(H::g_driven.empty() && session.ends.size() == 1);
-    reset(); H::Claim(&test::actor, "hook"); H::Tick(session);
+    // A continuously active Broomba refreshes a coasting row without turning it
+    // into a claim. Once refreshes stop, the normal rest edge closes the stream.
+    reset(); session.published.clear(); session.ends.clear();
+    H::Coast(&test::actor, "roomba"); H::Tick(session);
+    H::g_driven[0].lastMoveMs = coop::active_drive::NowMs() - 2000;
+    H::Coast(&test::actor, "roomba"); H::Tick(session);
+    assert(H::g_driven.size() == 1 && !H::g_driven[0].claimed && session.ends.empty());
+    H::g_driven[0].lastMoveMs = coop::active_drive::NowMs() - 2000;
+    H::Tick(session); assert(H::g_driven.empty() && session.ends.size() == 1);
+    reset(); H::Claim(&test::actor, "hook"); H::Coast(&test::actor, "roomba"); H::Tick(session);
+    assert(H::g_driven[0].claimed); // the Broomba feeder must not release another owner's claim
     H::g_driven[0].lastSendMs = H::g_driven[0].lastMoveMs = coop::active_drive::NowMs() - 2000;
     H::Tick(session); assert(H::g_driven.size() == 1); // resting claim stays active
     test::grab.gravityActor = &test::actor; H::Tick(session);
     assert(H::g_driven.empty()); // host reads the current hold before local_streams runs
     H::OnDisconnect();
     std::puts("PASS: production receiver/host: reordered ends, late spawn, local/remote holds, recycled slot, wrap, quick drop, slow ticks, send retry");
+    return 0;
 }

@@ -68,6 +68,7 @@ set(VOTVCOOP_SOURCES
     src/coop/props/llama_events.cpp
     src/coop/props/llama_begin_restore.cpp
     src/coop/props/watoy_sync.cpp
+    src/coop/props/roomba_sync.cpp
     src/coop/props/sponge_effects_sync.cpp
     src/coop/props/prop_knock.cpp
     src/coop/props/prop_scale_sync.cpp

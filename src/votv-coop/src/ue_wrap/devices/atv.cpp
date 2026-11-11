@@ -67,7 +67,6 @@ const wchar_t* const kModuleNames[8] = {
 void* g_honkFn = nullptr;
 void* g_honkReleaseFn = nullptr;
 void* g_setBrakeFn = nullptr;   // applies the brake bool to the constraint
-void* g_loadLightsFn = nullptr; // applies the lights bool to the lamps
 void* g_setKeyFn = nullptr;
 int32_t g_skipByte = -1;        // skipSave, else ignoreSave
 uint8_t g_skipMask = 0;
@@ -127,7 +126,6 @@ bool EnsureResolved() {
     if (!g_honkFn) g_honkFn = R::FindFunction(cls, L"InpActEvt_atv_honk_K2Node_InputActionEvent");
     g_honkReleaseFn = R::FindFunction(cls, L"InpActEvt_atv_honk_K2Node_InputActionEvent_15");
     g_setBrakeFn = R::FindFunction(cls, L"setBrake");
-    g_loadLightsFn = R::FindFunction(cls, L"loadLights");
     // setKey is often declared on the save parent, and FindFunction does not climb.
     g_setKeyFn = R::FindDispatchFunction(cls, L"setKey", nullptr);
     if (!R::FindBoolProperty(cls, L"skipSave", g_skipByte, g_skipMask))
@@ -145,13 +143,13 @@ bool EnsureResolved() {
     g_resolved.store(true, std::memory_order_release);
     UE_LOGI("atv: resolved ATV_C=%p Key@0x%04X Player@0x%04X isDriven@0x%04X fuel@0x%04X "
             "health@0x%04X brake@%d/%02X lights@%d/%02X turbo@%d/%02X hasMap@%d/%02X "
-            "radioComp@%d mapComp@%d honk=%p setBrake=%p loadLights=%p",
+            "radioComp@%d mapComp@%d honk=%p setBrake=%p",
             cls, g_keyOff, g_playerOff, g_isDrivenOff, g_fuelOff, g_healthOff,
             g_brakeByte, static_cast<unsigned>(g_brakeMask),
             g_lightsByte, static_cast<unsigned>(g_lightsMask),
             g_turboByte, static_cast<unsigned>(g_turboMask),
             g_hasMapByte, static_cast<unsigned>(g_hasMapMask),
-            g_radioCompOff, g_mapCompOff, g_honkFn, g_setBrakeFn, g_loadLightsFn);
+            g_radioCompOff, g_mapCompOff, g_honkFn, g_setBrakeFn);
     return true;
 }
 
@@ -543,10 +541,64 @@ void SetBrake(void* atv, bool on) {
     CallApply(atv, g_setBrakeFn);  // the bool alone leaves the constraint where it was
 }
 void SetLights(void* atv, bool on) {
-    if (g_lightsMask == 0 || GetLights(atv) == on) return;
+    if (g_lightsMask == 0 || !atv || !R::IsLive(atv) || GetLights(atv) == on) return;
+    // loadLights jumps into the input graph at 21999 and then plays 2D audio.
+    // Call the visual subroutine directly. It retains the native battery check.
+    void* const visual = R::FindDispatchFunctionCached(R::ClassOf(atv), L"Upd Lights");
+    if (!visual) return;
     WriteFlag(atv, g_lightsByte, g_lightsMask, on);
-    CallApply(atv, g_loadLightsFn);
+    CallApply(atv, visual);
 }
+
+static ue_wrap::CachedObjRef g_engineAudioRange;
+
+void PrepareEngineAudio(uint64_t nowMs) {
+    static uint64_t retryMs = 0;
+    if (g_engineAudioRange.Get() || nowMs < retryMs) return;
+    retryMs = nowMs + 2000;  // also fences reentry through SpawnObject
+    engine::SoundAttenuationConfig config{};
+    config.distanceAlgorithm = 0;
+    config.extents[0] = 150.f;
+    config.falloffDistance = 1350.f;
+    g_engineAudioRange.Set(engine::SpawnSoundAttenuation(config));
+}
+
+bool ConfigureEngineAudio(void* atv) {
+    void* const attenuation = g_engineAudioRange.Get();
+    if (!attenuation) return false;
+    if (!atv || !R::IsLive(atv) || !IsAtv(atv)) return false;
+    void* const audioClass = object_index::ClassByName(L"AudioComponent");
+    if (!audioClass) return false;
+    const int32_t settingsOffset = R::FindPropertyOffset(audioClass, L"AttenuationSettings");
+    int32_t spatialByte = -1, overrideByte = -1;
+    uint8_t spatialMask = 0, overrideMask = 0;
+    if (settingsOffset < 0 ||
+        !R::FindBoolProperty(audioClass, L"bAllowSpatialization", spatialByte, spatialMask) ||
+        !R::FindBoolProperty(audioClass, L"bOverrideAttenuation", overrideByte, overrideMask))
+        return false;
+    static constexpr const wchar_t* engineFields[] = {
+        L"audio_car_start_Cue", L"audio_car_drive_loop", L"audio_car_turbo",
+        L"audio_car_drive_start", L"audio_car_drive_brake", L"audio_car_stop",
+    };
+    void* const atvClass = R::ClassOf(atv);
+    bool complete = true;
+    for (const auto* field : engineFields) {
+        void* const component = ComponentAt(atv, R::FindPropertyOffset(atvClass, field));
+        void* const cls = component ? R::ClassOf(component) : nullptr;
+        if (!cls || !R::IsDescendantOfAny(cls, &audioClass, 1)) {
+            complete = false;
+            continue;
+        }
+        // Edit only this ATV's engine emitters. Native Play/Activate keeps its
+        // original pitch, volume and timing, with the range applied at startup.
+        auto* bytes = static_cast<uint8_t*>(component);
+        std::memcpy(bytes + settingsOffset, &attenuation, sizeof(attenuation));
+        WriteFlag(component, spatialByte, spatialMask, true);
+        WriteFlag(component, overrideByte, overrideMask, false);
+    }
+    return complete;
+}
+
 void SetTurbo(void* atv, bool on) { WriteFlag(atv, g_turboByte, g_turboMask, on); }
 void SetRadio(void* atv, bool on) {
     void* player = RadioMedia(atv);

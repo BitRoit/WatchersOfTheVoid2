@@ -4,6 +4,7 @@
 #include "ue_wrap/core/script_gate.h"
 #include "ue_wrap/core/log.h"
 #include "ue_wrap/engine/world_identity.h"
+#include "coop/element/player.h"
 #include "coop/net/session.h"
 #include <algorithm>
 #include <array>
@@ -27,6 +28,11 @@ uint64_t sequence=0;
 std::deque<Obj> objects;
 std::vector<Obj*> slots{nullptr};
 Obj* local=nullptr;
+Obj* puppet=nullptr;
+Obj* panelClass=nullptr;
+Obj* conFunction=nullptr;
+int overlapOffset=0,overlapFrameSize=sizeof(void*);
+bool overlapEndLive=true;
 coop::net::Session session,other;
 uint32_t world=1,serial=1;
 std::array<std::string,coop::net::kMaxPeers> guids;
@@ -48,6 +54,17 @@ int32_t SlotSerial(int32_t i){return i>0&&size_t(i)<test::slots.size()?test::slo
 int32_t AllocateSlotSerial(int32_t i){return SlotSerial(i);}
 bool IsLiveByIndex(void* p,int32_t i){return i>0&&size_t(i)<test::slots.size()&&test::slots[i]==p&&test::slots[i]->live;}
 bool IsLive(void* p){return p&&static_cast<test::Obj*>(p)->live;}
+const FName& NameOf(void* p){
+ static const FName con{1,0},panel{2,0},other{};
+ return p==test::conFunction?con:p==test::panelClass?panel:other;
+}
+bool NameEquals(const FName& name,const wchar_t* expected){
+ return (name.ComparisonIndex==1 && std::wstring(expected)==L"con") ||
+        (name.ComparisonIndex==2 && std::wstring(expected)==L"panel_SATconsole_C");
+}
+void* OuterOf(void* p){return p==test::conFunction?test::panelClass:nullptr;}
+int32_t FindParamOffset(void*,const wchar_t* name){return std::wstring(name)==L"OtherActor"?test::overlapOffset:-1;}
+int32_t FunctionFrameSize(void*){return test::overlapFrameSize;}
 }
 namespace ue_wrap::world_identity {
 uint32_t Generation(){return test::world;}
@@ -93,6 +110,10 @@ namespace script_gate {
 bool WatchName(const facts::Function& fn,int tag,PreFn pre,PostFn post){if(test::failWriteWatch&&std::wstring(fn.Name())==L"writeToLog")return false;test::watches[fn.Name()]={tag,pre,post};return true;}
 bool UnwatchName(const facts::Function& fn,int tag,PreFn pre,PostFn post){const auto found=test::watches.find(fn.Name());if(found==test::watches.end()||found->second.tag!=tag||found->second.pre!=pre||found->second.post!=post)return false;test::watches.erase(found);return true;}
 bool IsInvocationActive(uint64_t id){return test::active.count(id)!=0;}
+bool NameWatchLive(const facts::Function& fn,int tag){
+ if(tag==coop::sat_console_sync::kTagPanelEnd&&!test::overlapEndLive)return false;
+ return test::watches.count(fn.Name())!=0;
+}
 }
 namespace console_desk {void* Instance(){return test::local;}}
 namespace dish {int IndexOf(void*){return -1;}void* DishByIndex(int){return nullptr;}int Count(){return 0;}}
@@ -129,7 +150,12 @@ bool ClearLog(void* p){static_cast<test::Obj*>(p)->log.clear();return CallWriteT
 bool RunCommand(void*,const std::wstring&){++test::nativeRuns;return true;}
 }
 }
+namespace coop::players {
+Registry& Registry::Get(){static auto* instance=new Registry;return *instance;}
+bool Registry::IsPuppetBody(void* p){return p && p==test::puppet;}
+}
 namespace coop::net::session_serial {uint32_t Current(){return test::serial;}}
+namespace coop::floppy_slot_sync {void Tick() {}}
 namespace coop::player_handshake {const std::string& GuidForSlot(int slot){return test::guids.at(slot);}}
 
 namespace test {
@@ -138,6 +164,7 @@ void Reset(Role role=Role::Client){
  onNative={};onConsume={};onPrint={};beforePrint={};session.onSend={};other.onSend={};S::OnDisconnect();
  for(const auto& p:objects)CHECK(p.pins==0);
  objects.clear();slots.resize(1);local=Make();world=1;++serial;consumes=nativeRuns=0;active.clear();printAttempts.clear();
+ puppet=panelClass=conFunction=nullptr;overlapOffset=0;overlapFrameSize=sizeof(void*);overlapEndLive=true;
  session=coop::net::Session{};other=coop::net::Session{};session.mode=other.mode=role;
  for(int i=0;i<coop::net::kMaxPeers;++i)guids[i]="peer-"+std::to_string(i);
  S::Install(&session);
@@ -282,10 +309,35 @@ void ReplayPreclaim(){
  }
 }
 void WatchRollback(){
- Reset();watches.clear();S::g_watched=false;S::g_watchRetry={};failWriteWatch=true;S::EnsureWatched();
+ Reset();watches.clear();S::g_watched=false;S::g_contextWatched=false;S::g_watchRetry={};failWriteWatch=true;S::EnsureWatched();
  CHECK(!S::g_watched);CHECK(watches.empty());
- failWriteWatch=false;S::g_watchRetry={};S::EnsureWatched();CHECK(S::g_watched&&watches.size()==3);
+ failWriteWatch=false;S::g_watchRetry={};S::EnsureWatched();CHECK(S::g_watched&&S::g_contextWatched&&watches.size()==6);
  CHECK(watches.at(L"ExecuteUbergraph_ui_console").pre==S::OnBodyPre);
+}
+void PanelContext(){
+ for (const auto role:{Role::Host,Role::Client}){
+  Reset(role);panelClass=Make();conFunction=Make();
+  sg::Call call{};call.object=local;call.callerObject=Make();call.callerFunction=conFunction;
+  const auto hook=watches.at(L"init").pre;
+  CHECK(hook(call)==V::Run);
+  local->busy=true;CHECK(hook(call)==V::Cancel);
+  auto direct=call;direct.callerFunction=nullptr;CHECK(hook(direct)==V::Run);
+  auto privateInit=call;privateInit.object=Make();static_cast<Obj*>(privateInit.object)->busy=true;
+  CHECK(hook(privateInit)==V::Run);
+  local->busy=false;Frame body;CHECK(Enter(body,local,L"help")==V::Run);
+  CHECK(hook(call)==V::Cancel);Post(body);CHECK(hook(call)==V::Run);
+  local->busy=true;S::OnDisconnect();CHECK(hook(call)==V::Run);
+ }
+}
+void PanelOverlap(){
+ Reset(Role::Host);puppet=Make();
+ sg::Call call{};call.function=Make();void* other=puppet;call.locals=reinterpret_cast<uint8_t*>(&other);
+ const auto begin=watches.at(S::kRowPanelBegin.Name()).pre;
+ const auto end=watches.at(S::kRowPanelEnd.Name()).pre;
+ CHECK(begin(call)==V::Cancel && end(call)==V::Cancel);
+ other=local;CHECK(begin(call)==V::Run && end(call)==V::Run);
+ other=puppet;overlapFrameSize=sizeof(void*)-1;CHECK(begin(call)==V::Run);
+ overlapFrameSize=sizeof(void*);overlapEndLive=false;CHECK(begin(call)==V::Run);
 }
 void ExactPost(){
  for(int mode=0;mode<3;++mode){
@@ -317,6 +369,7 @@ void InvalidOutput(){
 }
 int main(int argc,char** argv){using namespace test;struct Case{const char* name;void(*run)();};const Case cases[]={
  {"exact-post",ExactPost},{"owned-body",OwnedBody},{"long-input",LongInput},{"invalid-output",InvalidOutput},
+ {"panel-context",PanelContext},{"panel-overlap",PanelOverlap},
  {"consume-failure",ConsumeFailure},{"client-retirement",ClientRetirement},{"consume-reentry",ConsumeReentry},{"consume-before-send",ConsumeBeforeSend},
  {"stale-post",StalePost},{"nested-clear",NestedClear},{"unwound-frame",UnwoundFrame},{"local-graph",LocalGraph},{"write-retirement",WriteRetirement},{"display-failure-clear",DisplayFailureClear},{"display-failure-append",DisplayFailureAppend},
  {"display-retirement",DisplayRetirement},{"host-display-reset",HostDisplayReset},{"replay-attribution",ReplayAttribution},{"replay-new-session",ReplayNewSession},{"replay-preclaim",ReplayPreclaim},{"watch-rollback",WatchRollback}};

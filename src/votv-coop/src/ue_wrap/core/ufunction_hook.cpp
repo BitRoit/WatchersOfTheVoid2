@@ -63,7 +63,7 @@ struct Slot {
 // role can be full on the other, and a hook that cannot install makes a fix work on one peer
 // and not the other. The count here covers the standing installs plus the driver natives and
 // QuitGame that a probe patches on top.
-constexpr int kMaxNativeHooks = 64;
+constexpr int kMaxNativeHooks = 128;
 Slot g_slots[kMaxNativeHooks];
 int  g_slotCount = 0;
 // The VM's exec-handler table, taken from script_gate by the first pre hook's install.

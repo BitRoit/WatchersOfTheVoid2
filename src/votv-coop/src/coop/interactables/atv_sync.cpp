@@ -19,6 +19,7 @@
 #include "coop/interactables/atv_authority.h"
 #include "coop/interactables/atv_steering_sync.h"
 #include "coop/player/remote_player.h"
+#include "coop/player/flashlight_click_sound.h"
 #include "ue_wrap/core/script_gate.h"
 #include "coop/interactables/atv_condition_sync.h"
 #include "coop/interactables/atv_corrector.h"
@@ -454,6 +455,22 @@ void Install(coop::net::Session* session) {
     }
 }
 
+static void ApplyRemoteLights(AtvEntry& entry, bool enabled, bool snapshot) {
+    void* const actor = entry.actor;
+    const bool sameSource = entry.headlightAudioActor.Is(actor) &&
+                            entry.headlightAudioSyncer == entry.syncerSlot;
+    const bool edge = !snapshot && sameSource && entry.headlightAudioState != enabled;
+    if (!sameSource) entry.headlightAudioActor.Set(actor);
+    entry.headlightAudioSyncer = entry.syncerSlot;
+    entry.headlightAudioState = enabled;
+    const auto actorRef = entry.headlightAudioActor;
+    const auto session = coop::net::session_serial::Current();
+    A::SetLights(actor, enabled);
+    if (edge && actorRef.Get() && session == coop::net::session_serial::Current() &&
+        A::GetLights(actor) == enabled)
+        coop::flashlight_click_sound::PlayAtvHeadlightClick(actor, enabled);
+}
+
 void OnReliable(const coop::net::AtvStatePayload& payload, uint8_t senderPeerSlot) {
     std::wstring key = StringFromWireKey(payload.key);
     if (key.empty()) {
@@ -483,7 +500,7 @@ void OnReliable(const coop::net::AtvStatePayload& payload, uint8_t senderPeerSlo
         NoteSyncerHealth(e, senderPeerSlot, payload.health);
         coop::atv_corrector::ApplyCorrection(e, payload, /*snap*/ false);
     A::SetBrake(e.actor, (payload.stateBits & coop::net::kAtvStateBitBrake) != 0);
-    A::SetLights(e.actor, (payload.cockpit & coop::net::kAtvCockpitLights) != 0);
+    ApplyRemoteLights(e, (payload.cockpit & coop::net::kAtvCockpitLights) != 0, false);
     A::SetTurbo(e.actor, (payload.cockpit & coop::net::kAtvCockpitTurbo) != 0);
     A::SetRadio(e.actor, (payload.cockpit & coop::net::kAtvCockpitRadio) != 0);
     A::SetHasMap(e.actor, (payload.cockpit & coop::net::kAtvCockpitMap) != 0);
@@ -532,7 +549,7 @@ void OnReliable(const coop::net::AtvStatePayload& payload, uint8_t senderPeerSlo
     // The condition block applies after the pose, behind the same gates; every block a client receives is the
     // host's, and its presence is consumed only for the host's own copy (atv_condition_sync.h).
     A::SetBrake(e.actor, (payload.stateBits & coop::net::kAtvStateBitBrake) != 0);
-    A::SetLights(e.actor, (payload.cockpit & coop::net::kAtvCockpitLights) != 0);
+    ApplyRemoteLights(e, (payload.cockpit & coop::net::kAtvCockpitLights) != 0, payload.adopt != 0);
     A::SetTurbo(e.actor, (payload.cockpit & coop::net::kAtvCockpitTurbo) != 0);
     A::SetRadio(e.actor, (payload.cockpit & coop::net::kAtvCockpitRadio) != 0);
     A::SetHasMap(e.actor, (payload.cockpit & coop::net::kAtvCockpitMap) != 0);
@@ -754,9 +771,15 @@ void Tick() {
     void* owned[coop::atv_hit_guard::kMaxOwned];
     int   ownedN = 0;
 
+    if (!g_atvs.empty()) A::PrepareEngineAudio(nowMs);
+    if (s != g_session.load(std::memory_order_acquire) || !IndexCurrent()) return;
     for (auto& kv : g_atvs) {
         AtvEntry& e = kv.second;
         if (!R::IsLiveByIndex(e.actor, e.idx)) continue;
+        if (!e.engineAudioActor.Is(e.actor) && nowMs >= e.engineAudioRetryMs) {
+            e.engineAudioRetryMs = nowMs + 2000;
+            if (A::ConfigureEngineAudio(e.actor)) e.engineAudioActor.Set(e.actor);
+        }
         if (!isHost) {
             TickClientBody(*s, e, kv.first, localPlayer, localSlot, gateOpen);
             A::ReadTrap(e.actor, e.copyTrapSeen);   // this copy's own trap, kept for the explosion request
@@ -776,6 +799,7 @@ void Tick() {
             FlushLocalService(s,e,kv.first,isHost,localSlot,nowMs);
         } else if (syncs) coop::atv_condition_sync::ResetLocalService(e);
         if (syncs) {
+            e.headlightAudioActor.Reset();  // the next remote owner seeds its own baseline
             if (ownedN < coop::atv_hit_guard::kMaxOwned) {
                 owned[ownedN++] = e.actor;
             } else {
@@ -974,7 +998,6 @@ void OnConditionEdit(const coop::net::AtvConditionEditPayload& payload, uint8_t 
     }
     AtvEntry& e = it->second;
     if (!R::IsLiveByIndex(e.actor, e.idx)) return;
-    void* localPlayer = coop::players::Registry::Get().Local();
     const uint8_t localSlot = coop::players::Registry::Get().LocalPeerId();
     const bool iAuthor = e.syncerSlot == localSlot;
     const bool putsOn = payload.tiresAdded != 0 || payload.spareAdded != 0;

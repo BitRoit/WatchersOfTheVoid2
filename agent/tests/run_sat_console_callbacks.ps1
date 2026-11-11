@@ -48,7 +48,9 @@ try {
    @{Name='display-widget';Case='display-retirement';Replacements=@(@{Before='if(!ok || !SurfaceCurrent(source)) {';After='if(!ok) {'})},
    @{Name='replay-invocation';Case='replay-attribution';Replacements=@(@{Before='!g_replay->claimed && !g_replay->probing';After='!g_replay->probing'})},
    @{Name='replay-preclaim';Case='replay-preclaim';Replacements=@(@{Before='text==replay.text && type==replay.type';After='true'})},
-   @{Name='watch-identity';Case='watch-rollback';Replacements=@(@{Before='if (graph) sg::UnwatchName(kRowUbergraph, kTagGraph, OnBodyPre, OnBodyPost);';After='if (graph) sg::UnwatchName(kRowUbergraph, kTagGraph, nullptr, OnBodyPost);'})}
+   @{Name='watch-identity';Case='watch-rollback';Replacements=@(@{Before='if (graph) sg::UnwatchName(kRowUbergraph, kTagGraph, OnBodyPre, OnBodyPost);';After='if (graph) sg::UnwatchName(kRowUbergraph, kTagGraph, nullptr, OnBodyPost);'})},
+   @{Name='panel-context';Case='panel-context';Replacements=@(@{Before='SC::ReadProcessing(c.object, busy) && busy && SurfaceCurrent(source)';After='false'})},
+   @{Name='panel-overlap';Case='panel-overlap';Replacements=@(@{Before='other && coop::players::Registry::Get().IsPuppetBody(other)';After='false'})}
   )
   foreach($mutation in $mutations){
    $copy=$sourceText

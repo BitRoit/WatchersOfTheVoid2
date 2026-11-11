@@ -90,4 +90,41 @@ bool CallVirusLockout(void* p);
 // panel ran setPower from the host's canonical. Game thread.
 bool WriteLightPower(bool on);
 
+// ---- breaker component widget (ui_breakerComp_C) support ----
+// Helpers for the laptop / portable PC's Components tab. Resolved lazily on the widget instance. Game thread.
+
+// True iff obj's class is ui_breakerComp_C or a subclass.
+bool IsBreakerCompWidget(void* obj);
+
+// Read ui_breakerComp_C's index property (0=calc, 1=downl, 2=coord, 3=play, 4=light). False on failure or null.
+bool ReadBreakerCompIndex(void* widget, int32_t& outIndex);
+
+// Validate the cooked 0.9.0n widget continuation and its current panel binding. If unavailable,
+// callers can leave the entire native click and delay untouched. Game thread.
+bool CanFinishBreakerComp(void* widget, void* panel);
+
+enum class BreakerCompFinish : uint8_t { Unavailable, Ran, Faulted };
+
+// Execute the widget's verified native delay continuation. Faulted means dispatch began but may
+// have partly applied its effects; it must not be repeated or followed by a synthetic flip.
+BreakerCompFinish FinishBreakerComp(void* widget, void* panel);
+
+// Convert ui_breakerComp_C index to powerControl breaker bit mask:
+// index 0 -> bit 3 (kCalcBit, 0x08)
+// index 1 -> bit 1 (0x02, downl)
+// index 2 -> bit 0 (0x01, coord)
+// index 3 -> bit 2 (0x04, play)
+// index 4 -> bit 4 (0x10, light)
+// Returns 0 if invalid.
+uint8_t BreakerBitForCompIndex(int32_t compIndex);
+
+// Reset ui_breakerComp_C's switcher_button to index 0 (idle button, clearing stuck loading throbber).
+bool ResetBreakerCompSwitcher(void* widget);
+
+// Invoke ui_breakerComp_C's upd() to refresh its indicator lights and button tint.
+bool RefreshBreakerCompVisual(void* widget);
+
+// Play the native breaker button toggle sound (buttonshort16 2D cue).
+bool PlayBreakerButtonSound(void* widget);
+
 }  // namespace ue_wrap::power_control

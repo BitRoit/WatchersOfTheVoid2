@@ -9,6 +9,7 @@
 #include "coop/net/protocol.h"
 #include "coop/net/session.h"
 #include "coop/net/session_serial.h"
+#include "coop/player/players_registry.h"
 #include "coop/session/player_handshake.h"  // GuidForSlot: a typist's durable identity
 
 #include "ue_wrap/core/game_thread.h"
@@ -25,6 +26,7 @@
 #include <atomic>
 #include <algorithm>
 #include <chrono>
+#include <cstring>
 #include <deque>
 #include <cwctype>
 #include <string>
@@ -40,6 +42,7 @@ namespace T  = coop::sat_console_table;
 namespace W  = coop::save_record_wire;
 namespace GT = ue_wrap::game_thread;
 namespace WI = ue_wrap::world_identity;
+namespace R = ue_wrap::reflection;
 namespace sg = ue_wrap::script_gate;
 using Clock = std::chrono::steady_clock;
 using coop::net::kMaxPeers;
@@ -68,12 +71,21 @@ const wchar_t* const kErrLine  = L"<r>err</>";                   // the game's a
 UE_FACT_FN(kRowEnterCommand, "sat_console_sync", L"ui_console_C", L"enterCommand", Declared);
 UE_FACT_FN(kRowUbergraph, "sat_console_sync", L"ui_console_C", L"ExecuteUbergraph_ui_console", Declared);
 UE_FACT_FN(kRowWriteToLog, "sat_console_sync", L"ui_console_C", L"writeToLog", Declared);
+UE_FACT_FN(kRowInit, "sat_console_sync", L"ui_console_C", L"init", Declared);
+UE_FACT_FN(kRowPanelBegin, "sat_console_sync", L"panel_SATconsole_C",
+           L"BndEvt__updName_K2Node_ComponentBoundEvent_0_ComponentBeginOverlapSignature__DelegateSignature", Declared);
+UE_FACT_FN(kRowPanelEnd, "sat_console_sync", L"panel_SATconsole_C",
+           L"BndEvt__panel_SATconsole_updName_K2Node_ComponentBoundEvent_1_ComponentEndOverlapSignature__DelegateSignature", Declared);
 constexpr int kTagEnter = 0x53434E45;  // 'SCNE'
 constexpr int kTagWrite = 0x53434E57;  // 'SCNW'
 constexpr int kTagGraph = 0x53434E47;  // 'SCNG'
+constexpr int kTagInit = 0x53434E49;
+constexpr int kTagPanelBegin = 0x53434E42;
+constexpr int kTagPanelEnd = 0x53434E4E;
 
 std::atomic<coop::net::Session*> g_session{nullptr};
 bool g_watched = false;
+bool g_contextWatched = false;
 Clock::time_point g_watchRetry{};
 bool g_saidWatchFailure=false;
 coop::blob_chunks::Assembler g_asm;
@@ -230,6 +242,38 @@ std::optional<BodyFrame> ActiveBody(void* term,bool commandsOnly=false) {
     for(auto it=g_bodies.rbegin();it!=g_bodies.rend();++it)
         if(it->source.term.Raw()==term && (!commandsOnly || it->command) && sg::IsInvocationActive(it->invocation))return *it;
     return std::nullopt;
+}
+
+sg::Verdict OnPanelInitPre(const sg::Call& c) {
+    // Every physical panel shares this machine's visible console. Its con()
+    // calls init even if the previous command has a pending native Delay.
+    if (!c.object || !c.callerObject || !c.callerFunction ||
+        !R::NameEquals(R::NameOf(c.callerFunction), L"con")) return sg::Verdict::Run;
+    void* const owner = R::OuterOf(c.callerFunction);
+    if (!owner || !R::NameEquals(R::NameOf(owner), L"panel_SATconsole_C")) return sg::Verdict::Run;
+    const auto source = CaptureSurface(c.object, true);
+    if (!SurfaceCurrent(source)) return sg::Verdict::Run;
+    const auto command = ActiveBody(c.object, true);
+    if (command && SurfaceCurrent(command->source)) return sg::Verdict::Cancel;
+    bool busy = false;
+    return SC::ReadProcessing(c.object, busy) && busy && SurfaceCurrent(source)
+        ? sg::Verdict::Cancel : sg::Verdict::Run;
+}
+
+sg::Verdict OnPanelOverlapPre(const sg::Call& c) {
+    if (!c.locals || !c.function ||
+        !sg::NameWatchLive(kRowPanelBegin, kTagPanelBegin) ||
+        !sg::NameWatchLive(kRowPanelEnd, kTagPanelEnd)) return sg::Verdict::Run;
+    // Native overlap casts to MainPlayer, which also accepts remote mirrors.
+    // Deny both edges so the native withinConsoles counter remains balanced.
+    const int offset = R::FindParamOffset(c.function, L"OtherActor");
+    const int size = R::FunctionFrameSize(c.function);
+    if (offset < 0 || size < int(sizeof(void*)) || offset > size - int(sizeof(void*)))
+        return sg::Verdict::Run;
+    void* other = nullptr;
+    std::memcpy(&other, c.locals + offset, sizeof(other));
+    return other && coop::players::Registry::Get().IsPuppetBody(other)
+        ? sg::Verdict::Cancel : sg::Verdict::Run;
 }
 
 sg::Verdict TrackBody(const sg::Call& c,const Surface& source,bool command=false,bool clear=false) {
@@ -885,18 +929,29 @@ void OnBodyPost(const sg::Call& c) {
 // The three watches stand or fall together: a line refused on a client whose answers no watch would send
 // back would vanish.
 void EnsureWatched() {
-    if (g_watched || Clock::now()<g_watchRetry) return;
+    if ((g_watched && g_contextWatched) || Clock::now()<g_watchRetry) return;
     g_watchRetry=Clock::now()+std::chrono::seconds(1);
-    const bool enter = sg::WatchName(kRowEnterCommand, kTagEnter, OnEnterPre, OnBodyPost);
-    const bool graph = sg::WatchName(kRowUbergraph, kTagGraph, OnBodyPre, OnBodyPost);
-    const bool write = sg::WatchName(kRowWriteToLog, kTagWrite, OnWritePre, nullptr);
-    if (enter && graph && write) {g_watched=true;return;}
-    if (enter) sg::UnwatchName(kRowEnterCommand, kTagEnter, OnEnterPre, OnBodyPost);
-    if (graph) sg::UnwatchName(kRowUbergraph, kTagGraph, OnBodyPre, OnBodyPost);
-    if (write) sg::UnwatchName(kRowWriteToLog, kTagWrite, OnWritePre, nullptr);
-    if(!g_saidWatchFailure) {
-        g_saidWatchFailure=true;
-        UE_LOGE("sat_console: a terminal watch did not register -- none kept; registration will retry");
+    if (!g_watched) {
+        const bool enter = sg::WatchName(kRowEnterCommand, kTagEnter, OnEnterPre, OnBodyPost);
+        const bool graph = sg::WatchName(kRowUbergraph, kTagGraph, OnBodyPre, OnBodyPost);
+        const bool write = sg::WatchName(kRowWriteToLog, kTagWrite, OnWritePre, nullptr);
+        if (enter && graph && write) g_watched=true;
+        else {
+            if (enter) sg::UnwatchName(kRowEnterCommand, kTagEnter, OnEnterPre, OnBodyPost);
+            if (graph) sg::UnwatchName(kRowUbergraph, kTagGraph, OnBodyPre, OnBodyPost);
+            if (write) sg::UnwatchName(kRowWriteToLog, kTagWrite, OnWritePre, nullptr);
+            if(!g_saidWatchFailure) {
+                g_saidWatchFailure=true;
+                UE_LOGE("sat_console: a terminal watch did not register -- none kept; registration will retry");
+            }
+        }
+    }
+    // The context protection can retry independently of the command router.
+    if (g_watched && !g_contextWatched) {
+        const bool init = sg::WatchName(kRowInit, kTagInit, OnPanelInitPre, nullptr);
+        const bool begin = sg::WatchName(kRowPanelBegin, kTagPanelBegin, OnPanelOverlapPre, nullptr);
+        const bool end = sg::WatchName(kRowPanelEnd, kTagPanelEnd, OnPanelOverlapPre, nullptr);
+        g_contextWatched = init && begin && end;
     }
 }
 

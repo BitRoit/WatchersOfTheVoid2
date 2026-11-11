@@ -1,5 +1,84 @@
 # WORK — current state and open work
 
+## Breaker and satellite-console playtest follow-up — 11 November 2026
+
+- [x] Local co-op launcher: use the installed Default and Client1 DLLs and
+  existing configuration. Give each test its own host and client log files.
+- [x] PWR3: run the game's breaker completion after the managed countdown.
+  Verify both the Blueprint fingerprint and the exact Delay and entry offsets
+  before dispatch. The widget handles its own spinner, waterlogged hint and
+  flip. A dry panel can still restore after the initiating widget retires.
+  Concurrent authoritative changes can cancel a pending countdown.
+- [x] SCX1: block physical panel rebinding of a shared console while a command
+  body or its delayed work is active. Ignore both console overlap edges for
+  registered remote mirrors. Keep idle local rebinding and host-side private
+  terminals on their existing paths.
+- [ ] Repeat a satellite floppy export while the other player crosses a
+  console panel. Check that the selected dish stays active and the result
+  remains on the same floppy after ejection and reinsertion.
+- [ ] Test the laptop breaker on both peers. Check countdown, displayed state
+  and actual power against the wall panel and the affected system.
+
+Combined Release candidate `3CC1FF65D8AD95BA17E0C012253166E9BE3F631A52181AD7C0553375B7A621EF`
+is installed and hash-verified in Default and Client1. The local launcher
+previously copied `051AD711` from `build/votv-coop/Release/main.dll` over it.
+The desktop installer and its `Install.7z` archive now package `3CC1FF65`.
+
+## Antigravity stabilization handoff — 10 November 2026 evening
+
+The last recorded 18:09 launches and both local profile DLLs still identify as
+`051AD711`. This playtest cannot verify any of the newer fixes.
+
+- [x] PWR2: track managed throbber cleanup by weak widget identity, retry failed
+  resets and release ownership when the native fallback takes over. Native
+  countdowns can retain index 1 while a co-op session is connected.
+- [x] ROACH2: estimate crawl yaw from consecutive host positions and interpolate
+  the short arc while preserving local pitch and roll. Retain bounded retries
+  for missing components and the existing spawn-authority tick gate.
+  Position-only packets cannot represent stationary turns or host surface tilt.
+- [x] ATVA2: remote updates call `Upd Lights` directly. The cooked
+  `loadLights` entry jumps to the input path before its 2D sound calls.
+  Removed speculative input hooks and shared SoundWave mutation. The local
+  driver's native input and the receiver's positional click remain separate.
+- [ ] In-game host/client acceptance on the exact new DLL.
+
+Release candidate `92F7001DE5B21EB846AF8F59FB8F57033D84E6EF1FFCDBDA6E4E92BD38D97208`,
+`0.9.0n b2217`, verified offline. Ready for local installation.
+
+## Broomba, breaker, roach and ATV audio follow-up — 10 November 2026
+
+The owner's playtest reported Broomba spinning, broken breakers, paused/teleporting
+roaches and distant ATV headlight and engine sounds. The broom and horn worked.
+Both 14:04 boot logs report `051AD711` (7 November), and both profile
+`dlls/main.dll` files again matched that build. Shimloader's redirect confirms
+the Client1 load came from the expected profile path. The earlier `4000DDFD`
+copy had been hash-verified after installation. The reason it was replaced is
+undetermined.
+
+- [x] BRM1: keep the native turn target on the equivalent yaw branch. Host
+  Broombas publish movement through prop coasting; clients suppress only native
+  Broomba wheel torque once host playback owns the prop.
+- [x] PWR1: restore the native breaker path outside multiplayer, preserve the
+  cooked upgrade-dependent delay distribution, and cancel stale restores after
+  a conflicting lever/page change or session, world or terminal retirement.
+- [x] ROACH1: interpolate continuous samples at the existing one-second host
+  poll, retain surviving components across population changes, and retry
+  individual native births under a fixed budget. The cooked add function can
+  silently refuse entries outside 10,000 units of the local camera or at the
+  population cap. A refused entry does not invalidate an admitted population.
+- [x] ATVA1: seed headlight audio from the accepted snapshot, then play native
+  click layers at the ATV for later edges within 1,000 units. Six native engine
+  emitters get a 150-unit inner radius and 1,350-unit falloff for new playback.
+  Horn and broom behavior are preserved in their existing lanes.
+- [ ] In-game acceptance on matching DLLs: active Broomba movement and turns,
+  concurrent breaker presses and return to solo, roach motion and partial
+  population, and ATV near/far click and engine sound.
+
+Local Release candidate `build/votv-coop/main.dll`, SHA256
+`39E8D353AF4CD64BB77D84CB3EEC7473B9C85115BB3A9423CDDCEE5DE9FD7890`.
+Build and loader ABI verified as `0.9.0n b2217`. Awaiting local installation and
+in-game acceptance. No release or friend package prepared.
+
 ## Remote flashlight absolute transform & view optimization (Revision 5) — 4 November 2026
 
 - [x] FL3: cached `lag_fl` and `light_R` property offsets (`viewLayoutClass_`, `lagFlOffset_`, `lightROffset_`) in `RemotePlayer`, eliminating hot-path reflection lookups on every presentation tick. Hardened `RefreshView` re-entrancy order: sample `TryGetActorLocation` first and re-verify `current() && viewLayoutClass_.Is(viewClass)` and `R::IsLive(lightComp)` before setting transform.
